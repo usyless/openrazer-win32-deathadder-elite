@@ -1,8 +1,15 @@
 # openrazer-win32-deathadder-elite (`da-elite.exe`)
 
+> [!IMPORTANT]
+> **Notice: This entire application, architecture, and codebase is 100% AI-generated.**
+
 A minimal, pure Win32 C++23 utility for configuring a **Razer DeathAdder Elite** (`1532:005C`) on Windows 11 without installing Razer Synapse.
 
 Based on the USB HID protocol reverse-engineered by [OpenRazer](https://github.com/openrazer/openrazer) and the user-space Windows HID approach from [openrazer-win](https://github.com/Ar4ikov/openrazer-win).
+
+<p align="center">
+  <img src="assets/app.png" alt="Razer DeathAdder Elite Settings Window" />
+</p>
 
 ## Features
 
