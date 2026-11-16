@@ -34,7 +34,7 @@ int main() try {
         uint8_t expected_crc = 0;
         for (size_t i = 3; i < 89; ++i) expected_crc ^= buf[i];
         assert(buf[89] == expected_crc);
-        assert(expected_crc == (0x01 ^ 0x00 ^ 0x05 ^ 0x01));
+        assert(expected_crc == (0x01u ^ 0x00u ^ 0x05u ^ 0x01u));
 
         const auto unpacked = unpack_feature_report(buf);
         assert(response_matches(req, unpacked));
@@ -96,6 +96,14 @@ int main() try {
         assert(roundtrip.buttons.x1.vk == VK_MEDIA_PLAY_PAUSE);
         assert(roundtrip.buttons.x1.mods == MOD_CONTROL);
         assert(roundtrip.buttons.dpi_up.kind == "dpi_up");
+    }
+
+    // 6. Windows startup registry round-trip (only mutate if not already enabled)
+    if (!is_startup_enabled()) {
+        assert(set_startup_enabled(true));
+        assert(is_startup_enabled());
+        assert(set_startup_enabled(false));
+        assert(!is_startup_enabled());
     }
 
     std::println("All protocol & settings tests passed.");

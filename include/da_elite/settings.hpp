@@ -227,7 +227,10 @@ inline bool set_startup_enabled(bool enable) {
     HKEY key = nullptr;
     LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\CurrentVersion\\Run",
                                  0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
-    if (st != ERROR_SUCCESS) return false;
+    if (st != ERROR_SUCCESS) {
+        SetLastError(static_cast<DWORD>(st));
+        return false;
+    }
     if (enable) {
         const std::wstring cmd = L"\"" + exe_path().wstring() + L"\" --tray";
         st = RegSetValueExW(key, L"da-elite", 0, REG_SZ,
@@ -238,7 +241,11 @@ inline bool set_startup_enabled(bool enable) {
         if (st == ERROR_FILE_NOT_FOUND) st = ERROR_SUCCESS;
     }
     RegCloseKey(key);
-    return st == ERROR_SUCCESS;
+    if (st != ERROR_SUCCESS) {
+        SetLastError(static_cast<DWORD>(st));
+        return false;
+    }
+    return true;
 }
 
 inline constexpr auto JSON_READ = glz::opts{.error_on_unknown_keys = false};

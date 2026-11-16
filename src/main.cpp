@@ -330,13 +330,30 @@ private:
             settings_,
             [this](const Settings& next, std::wstring& status_out) {
                 settings_ = next;
-                (void)set_startup_enabled(settings_.launch_on_startup);
+                if (!set_startup_enabled(settings_.launch_on_startup)) {
+                    const DWORD err = GetLastError();
+                    settings_.launch_on_startup = is_startup_enabled();
+                    const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
+                    MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
+                }
                 (void)save_settings(settings_);
                 apply_all_to_device(false);
                 status_out = build_status_text();
                 return true;
             },
-            [this] { return build_status_text(); });
+            [this] { return build_status_text(); },
+            [this](bool enable) {
+                if (!set_startup_enabled(enable)) {
+                    const DWORD err = GetLastError();
+                    const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
+                    MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
+                } else {
+                    settings_.launch_on_startup = enable;
+                    (void)save_settings(settings_);
+                }
+                settings_.launch_on_startup = is_startup_enabled();
+                return settings_.launch_on_startup;
+            });
     }
 
     [[nodiscard]] NOTIFYICONDATAW tray_data() const noexcept {
@@ -440,12 +457,19 @@ private:
             case IdPoll1000: set_quick_poll(1000); break;
             case IdPoll500: set_quick_poll(500); break;
             case IdPoll125: set_quick_poll(125); break;
-            case IdStartup:
-                settings_.launch_on_startup = !settings_.launch_on_startup;
-                (void)set_startup_enabled(settings_.launch_on_startup);
-                (void)save_settings(settings_);
+            case IdStartup: {
+                const bool want = !settings_.launch_on_startup;
+                if (!set_startup_enabled(want)) {
+                    const DWORD err = GetLastError();
+                    const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
+                    MessageBoxW(hwnd_, msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
+                } else {
+                    settings_.launch_on_startup = want;
+                    (void)save_settings(settings_);
+                }
                 config_.update_status_from_service(settings_);
                 break;
+            }
             case IdQuit:
                 DestroyWindow(hwnd_);
                 break;

@@ -121,6 +121,7 @@ class ConfigWindow {
 public:
     using ApplyCallback = std::function<bool(const Settings&, std::wstring& status_out)>;
     using StatusCallback = std::function<std::wstring()>;
+    using StartupCallback = std::function<bool(bool)>;
 
     ConfigWindow() = default;
     ~ConfigWindow() { close(); }
@@ -129,10 +130,12 @@ public:
     ConfigWindow(ConfigWindow&&) = delete;
     ConfigWindow& operator=(ConfigWindow&&) = delete;
 
-    void show(HINSTANCE inst, const Settings& current, ApplyCallback on_apply, StatusCallback on_status) {
+    void show(HINSTANCE inst, const Settings& current, ApplyCallback on_apply,
+              StatusCallback on_status, StartupCallback on_startup = {}) {
         inst_ = inst;
         on_apply_ = std::move(on_apply);
         on_status_ = std::move(on_status);
+        on_startup_ = std::move(on_startup);
         draft_ = current;
 
         if (hwnd_ != nullptr && IsWindow(hwnd_)) {
@@ -254,7 +257,7 @@ private:
         wc.hInstance = inst;
         wc.lpszClassName = CONFIG_CLASS;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.hbrBackground = nullptr;
         wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
         wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
         RegisterClassExW(&wc);
@@ -282,7 +285,10 @@ private:
                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst_, nullptr);
         if (c != nullptr) {
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font_.get()), TRUE);
-            if (dark_) SetWindowTheme(c, L"DarkMode_Explorer", nullptr);
+            if (dark_) {
+                const bool is_combo = (std::wstring_view{cls} == WC_COMBOBOXW);
+                SetWindowTheme(c, is_combo ? L"DarkMode_CFD" : L"DarkMode_Explorer", nullptr);
+            }
         }
         return c;
     }
@@ -453,6 +459,14 @@ private:
                 on_create(hwnd);
                 return 0;
 
+            case WM_ERASEBKGND: {
+                auto* hdc = reinterpret_cast<HDC>(wp);
+                RECT rc{};
+                GetClientRect(hwnd, &rc);
+                FillRect(hdc, &rc, (dark_ && bg_brush_) ? bg_brush_.get() : GetSysColorBrush(COLOR_BTNFACE));
+                return 1;
+            }
+
             case WM_CTLCOLORDLG:
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLORBTN:
@@ -465,6 +479,7 @@ private:
                 break;
 
             case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
                 if (dark_ && edit_brush_) {
                     auto* hdc = reinterpret_cast<HDC>(wp);
                     SetTextColor(hdc, RGB(240, 240, 240));
@@ -530,6 +545,15 @@ private:
                     return 0;
                 }
 
+                if (id == IdStartup && code == BN_CLICKED) {
+                    const bool want = (SendMessageW(chk_startup_, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    if (on_startup_) {
+                        const bool actual = on_startup_(want);
+                        draft_.launch_on_startup = actual;
+                        SendMessageW(chk_startup_, BM_SETCHECK, actual ? BST_CHECKED : BST_UNCHECKED, 0);
+                    }
+                    return 0;
+                }
                 if (id == IdApply) {
                     read_controls_into_draft();
                     sync_controls_from_draft();
@@ -573,6 +597,7 @@ private:
     Settings draft_{};
     ApplyCallback on_apply_;
     StatusCallback on_status_;
+    StartupCallback on_startup_;
     std::optional<ButtonId> recording_btn_;
 
     wil::unique_hfont font_;
