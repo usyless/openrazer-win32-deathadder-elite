@@ -1,5 +1,7 @@
 #pragma once
 
+#include <da_elite_version.h>
+
 #include <usylibpp/usylibpp.hpp>
 
 #include <windows.h>
@@ -15,7 +17,7 @@ namespace da_elite {
 namespace fs = std::filesystem;
 
 inline constexpr const wchar_t* APP_NAME = L"DeathAdder Elite";
-inline constexpr const wchar_t* APP_VERSION = L"0.1.0";
+inline constexpr const wchar_t* APP_VERSION = DA_ELITE_VERSION_WSTR;
 inline constexpr const wchar_t* SERVICE_CLASS = L"da_elite.service";
 inline constexpr const wchar_t* CONFIG_CLASS = L"da_elite.config";
 inline constexpr const wchar_t* INSTANCE_MUTEX = L"Local\\da_elite.instance";

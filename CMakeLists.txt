@@ -94,10 +94,21 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(usylibpp glaze)
 
 ##### Common compile settings
+foreach(_part IN ITEMS MAJOR MINOR PATCH TWEAK)
+    if(DEFINED PROJECT_VERSION_${_part} AND NOT "${PROJECT_VERSION_${_part}}" STREQUAL "")
+        set(DA_ELITE_VERSION_${_part} "${PROJECT_VERSION_${_part}}")
+    else()
+        set(DA_ELITE_VERSION_${_part} 0)
+    endif()
+endforeach()
+set(DA_ELITE_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+configure_file("${PROJECT_SOURCE_DIR}/resources/version.h.in" "${DA_ELITE_GENERATED_DIR}/da_elite_version.h" @ONLY)
+
 add_library(da_elite_common INTERFACE)
 target_include_directories(da_elite_common INTERFACE
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/resources"
+    "${DA_ELITE_GENERATED_DIR}"
 )
 target_link_libraries(da_elite_common INTERFACE usylibpp::usylibpp glaze::glaze)
 target_compile_definitions(da_elite_common INTERFACE
