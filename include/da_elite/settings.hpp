@@ -211,9 +211,11 @@ inline void sanitize_settings(Settings& s) {
     }
 }
 
+inline constexpr const wchar_t* RUN_REG_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
 [[nodiscard]] inline bool is_startup_enabled() noexcept {
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\CurrentVersion\\Run", 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
         return false;
     }
     DWORD type = 0;
@@ -225,7 +227,7 @@ inline void sanitize_settings(Settings& s) {
 
 inline bool set_startup_enabled(bool enable) {
     HKEY key = nullptr;
-    LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\CurrentVersion\\Run",
+    LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY,
                                  0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
     if (st != ERROR_SUCCESS) {
         SetLastError(static_cast<DWORD>(st));

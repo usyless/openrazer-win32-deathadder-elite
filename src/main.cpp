@@ -521,7 +521,8 @@ void print_help() {
         "  da-elite.exe --status        Query and print current mouse status, then exit\n"
         "  da-elite.exe --apply         Apply saved data\\settings.json once, then exit\n"
         "  da-elite.exe --poll <hz>     Set polling rate (125 | 500 | 1000), save & exit\n"
-        "  da-elite.exe --dpi <x> [y]   Set DPI (100..16000), save & exit");
+        "  da-elite.exe --dpi <x> [y]   Set DPI (100..16000), save & exit\n"
+        "  da-elite.exe --startup <on|off> Enable or disable launch on Windows startup");
 }
 
 int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
@@ -529,6 +530,7 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
 
     std::optional<uint16_t> req_poll;
     std::optional<std::pair<uint16_t, uint16_t>> req_dpi;
+    std::optional<bool> req_startup;
     bool do_status = false;
     bool do_apply = false;
 
@@ -542,6 +544,16 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
             do_status = true;
         } else if (a == L"--apply") {
             do_apply = true;
+        } else if (a == L"--startup" && i + 1 < args.size()) {
+            const std::wstring_view v = args[++i];
+            if (v == L"on" || v == L"1" || v == L"true") {
+                req_startup = true;
+            } else if (v == L"off" || v == L"0" || v == L"false") {
+                req_startup = false;
+            } else {
+                std::println(stderr, "Invalid --startup value. Use 'on' or 'off'.");
+                return 2;
+            }
         } else if (a == L"--poll" && i + 1 < args.size()) {
             const long v = std::wcstol(std::wstring{args[++i]}.c_str(), nullptr, 10);
             if (!protocol::is_valid_poll_rate(static_cast<uint16_t>(v))) {
@@ -564,6 +576,21 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
             print_help();
             return 2;
         }
+    }
+
+    if (req_startup.has_value()) {
+        if (!set_startup_enabled(*req_startup)) {
+            std::println(stderr, "Failed to update startup setting: {}", win32_error_utf8(GetLastError()));
+            return 1;
+        }
+        Settings s = load_settings();
+        s.launch_on_startup = is_startup_enabled();
+        (void)save_settings(s);
+        if (HWND svc = find_service_window()) {
+            send_app_cmd(svc, AppCmd::ApplySettings);
+        }
+        std::println("Windows startup: {}", s.launch_on_startup ? "enabled" : "disabled");
+        if (!do_status && !do_apply && !req_poll.has_value() && !req_dpi.has_value()) return 0;
     }
 
     DeathAdderEliteDevice mouse;

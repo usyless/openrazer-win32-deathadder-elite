@@ -287,7 +287,13 @@ private:
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font_.get()), TRUE);
             if (dark_) {
                 const bool is_combo = (std::wstring_view{cls} == WC_COMBOBOXW);
-                SetWindowTheme(c, is_combo ? L"DarkMode_CFD" : L"DarkMode_Explorer", nullptr);
+                const bool is_group = (std::wstring_view{cls} == WC_BUTTONW) &&
+                                      ((style & static_cast<DWORD>(BS_TYPEMASK)) == static_cast<DWORD>(BS_GROUPBOX));
+                if (is_group) {
+                    SetWindowTheme(c, L"", L"");
+                } else {
+                    SetWindowTheme(c, is_combo ? L"DarkMode_CFD" : L"DarkMode_Explorer", nullptr);
+                }
             }
         }
         return c;
