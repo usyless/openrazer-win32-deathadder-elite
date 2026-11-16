@@ -16,7 +16,7 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "openrazer-win32-deathadder-elite"
+            VALUE "CompanyName", "usy"
             VALUE "FileDescription", "Razer DeathAdder Elite Controller"
             VALUE "FileVersion", "0.1.0.0"
             VALUE "InternalName", "da-elite.exe"
