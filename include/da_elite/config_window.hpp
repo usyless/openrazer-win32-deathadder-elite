@@ -1,7 +1,6 @@
 #pragma once
 
 #include "common.hpp"
-#include "hid_device.hpp"
 #include "settings.hpp"
 
 #include "resource.h"
@@ -15,7 +14,6 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
