@@ -5,7 +5,7 @@ set(CMAKE_FIND_USE_PACKAGE_REGISTRY OFF CACHE BOOL "" FORCE)
 
 project(
     da_elite
-    VERSION 0.1.0
+    VERSION 0.1.1
     LANGUAGES C CXX RC
 )
 
