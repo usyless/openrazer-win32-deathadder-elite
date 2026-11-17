@@ -125,15 +125,17 @@ int main() try {
         Settings s{};
         std::string scratch;
         scratch.reserve(2048);
-        const char* const initial_ptr = scratch.data();
-        const size_t initial_cap = scratch.capacity();
-        assert(!glz::write<JSON_WRITE>(s, scratch));
+        [[maybe_unused]] const char* const initial_ptr = scratch.data();
+        [[maybe_unused]] const size_t initial_cap = scratch.capacity();
+        [[maybe_unused]] const auto err1 = glz::write<JSON_WRITE>(s, scratch);
+        assert(!err1);
         assert(!scratch.empty());
         assert(scratch.data() == initial_ptr);
         assert(scratch.capacity() == initial_cap);
         s.dpi_x = 1600;
         scratch.clear();
-        assert(!glz::write<JSON_WRITE>(s, scratch));
+        [[maybe_unused]] const auto err2 = glz::write<JSON_WRITE>(s, scratch);
+        assert(!err2);
         assert(scratch.data() == initial_ptr);
         assert(scratch.capacity() == initial_cap);
     }

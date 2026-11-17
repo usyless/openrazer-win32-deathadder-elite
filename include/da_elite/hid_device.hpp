@@ -12,8 +12,10 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -162,7 +164,15 @@ inline void enumerate_deathadder_collections(HidCollectionList& out) {
             continue;
         }
 
-        const std::wstring_view path{detail->DevicePath};
+        const size_t max_chars =
+            (required - offsetof(SP_DEVICE_INTERFACE_DETAIL_DATA_W, DevicePath)) / sizeof(wchar_t);
+        size_t path_len = 0;
+        while (path_len < max_chars && detail->DevicePath[path_len] != L'\0') {
+            ++path_len;
+        }
+        if (path_len == max_chars) continue;
+
+        const std::wstring_view path{detail->DevicePath, path_len};
         if (!contains_ascii_icase(path, L"vid_1532") || !contains_ascii_icase(path, L"pid_005c")) {
             continue;
         }

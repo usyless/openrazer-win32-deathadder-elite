@@ -80,13 +80,14 @@ enum class AppCmd : uint32_t {
 }
 
 inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcept {
+    if (path == nullptr) return false;
     const wil::unique_hfile h{CreateFileW(
         path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (!h) return false;
     size_t written_total = 0;
     while (written_total < data.size()) {
         const size_t remaining = data.size() - written_total;
-        const DWORD chunk = static_cast<DWORD>(remaining > 0x7FFF'FFFFu ? 0x7FFF'FFFFu : remaining);
+        const auto chunk = static_cast<DWORD>(remaining > 0x7FFF'FFFFu ? 0x7FFF'FFFFu : remaining);
         DWORD wrote = 0;
         if (!WriteFile(h.get(), data.data() + written_total, chunk, &wrote, nullptr) || wrote == 0) {
             return false;

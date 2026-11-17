@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -205,10 +206,11 @@ public:
     void handle_raw_input(HRAWINPUT lparam) {
         if (direct_reader_active_.load(std::memory_order_relaxed)) return;
         UINT size = 0;
-        if (GetRawInputData(lparam, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size == 0) {
+        if (GetRawInputData(lparam, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 ||
+            size < offsetof(RAWINPUT, data.hid.bRawData)) {
             return;
         }
-        std::array<uint8_t, 512> stack_buf{};
+        alignas(RAWINPUT) std::array<uint8_t, 512> stack_buf{};
         std::vector<uint8_t> heap_buf;
         uint8_t* raw_buf = stack_buf.data();
         if (size > stack_buf.size()) {
@@ -231,11 +233,14 @@ public:
             return;
         }
 
-        const uint8_t* ptr = raw->data.hid.bRawData;
         const size_t report_sz = raw->data.hid.dwSizeHid;
-        for (size_t i = 0; i < raw->data.hid.dwCount; ++i) {
+        if (report_sz < 16) return;
+        const size_t avail_bytes = size - offsetof(RAWINPUT, data.hid.bRawData);
+        const size_t report_count = (std::min)(static_cast<size_t>(raw->data.hid.dwCount), avail_bytes / report_sz);
+        const uint8_t* ptr = raw->data.hid.bRawData;
+        for (size_t i = 0; i < report_count; ++i) {
             const uint8_t* rep = ptr + (i * report_sz);
-            if (report_sz >= 16 && rep[0] == 0x04) {
+            if (rep[0] == 0x04) {
                 process_rep4(std::span<const uint8_t, 16>{rep, 16});
             }
         }
@@ -306,6 +311,7 @@ private:
     }
 
     void process_rep4(std::span<const uint8_t, 16> data) noexcept {
+        const std::scoped_lock lock{rep4_mu_};
         // Mirrors razermouse_driver.c: Report ID 0x04 holds active button bytes in [1..15].
         // 0x20 = DPI Up, 0x21 = DPI Down.
         const auto contains_code = [](std::span<const uint8_t, 16> arr, uint8_t code) noexcept {
@@ -343,7 +349,10 @@ private:
             }
             dpi_thread_.reset();
         }
-        prev_rep4_.fill(0);
+        {
+            const std::scoped_lock lock{rep4_mu_};
+            prev_rep4_.fill(0);
+        }
         register_raw_hid_fallback(collections);
 
         dpi_collections_.count = 0;
@@ -437,10 +446,12 @@ private:
                 c.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                 nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr)};
             if (!h) continue;
+            wil::unique_event_nothrow ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+            if (!ev) continue;
             HidD_SetNumInputBuffers(h.get(), 64);
             Reader& r = readers[reader_count++];
             r.file = std::move(h);
-            r.ev.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            r.ev = std::move(ev);
             r.ov.hEvent = r.ev.get();
             r.buf_len = c.input_len;
         }
@@ -479,7 +490,7 @@ private:
 
             if (handle_count == 0) break;
             const DWORD wait = WaitForMultipleObjects(static_cast<DWORD>(handle_count), handles.data(), FALSE, INFINITE);
-            if (dpi_stop_event_ && wait == WAIT_OBJECT_0) break;
+            if (wait == WAIT_FAILED || (dpi_stop_event_ && wait == WAIT_OBJECT_0)) break;
 
             for (size_t i = 0; i < reader_count; ++i) {
                 Reader& r = readers[i];
@@ -502,6 +513,7 @@ private:
     }
 
     std::mutex mu_;
+    std::mutex rep4_mu_;
     std::atomic<HWND> target_hwnd_{nullptr};
     std::array<RuntimeBinding, static_cast<size_t>(ButtonId::Count)> mappings_{};
     std::array<std::atomic<bool>, 3> remapped_mouse_{};
