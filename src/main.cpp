@@ -13,7 +13,6 @@
 #include <wil/resource.h>
 
 #include <algorithm>
-#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>

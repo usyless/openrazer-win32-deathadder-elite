@@ -10,7 +10,6 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <compare>
 #include <concepts>
 #include <cstdint>
 #include <filesystem>
