@@ -79,7 +79,7 @@ inline void append_mouse_input(std::array<INPUT, 6>& inputs, size_t& count,
 }
 
 inline void send_binding_event(const RuntimeBinding& binding, bool is_down) noexcept {
-    std::array<INPUT, 6> inputs{};
+    std::array<INPUT, 6> inputs; // NOLINT(cppcoreguidelines-pro-type-member-init)
     size_t count = 0;
 
     switch (binding.kind) {
@@ -210,7 +210,7 @@ public:
             size < offsetof(RAWINPUT, data.hid.bRawData)) {
             return;
         }
-        alignas(RAWINPUT) std::array<uint8_t, 512> stack_buf{};
+        alignas(RAWINPUT) std::array<uint8_t, 512> stack_buf; // NOLINT(cppcoreguidelines-pro-type-member-init)
         std::vector<uint8_t> heap_buf;
         uint8_t* raw_buf = stack_buf.data();
         if (size > stack_buf.size()) {
@@ -383,7 +383,7 @@ private:
         HWND target = target_hwnd_.load(std::memory_order_relaxed);
         if (target == nullptr || raw_pages_count_ > 0) return;
 
-        std::array<RAWINPUTDEVICE, MAX_HID_COLLECTIONS> rids{};
+        std::array<RAWINPUTDEVICE, MAX_HID_COLLECTIONS> rids; // NOLINT(cppcoreguidelines-pro-type-member-init)
         size_t rid_count = 0;
         for (const auto& c : cols) {
             if (c.input_len < 16) continue;
@@ -428,16 +428,16 @@ private:
 
     void dpi_reader_loop() noexcept {
         static constexpr size_t MAX_DPI_INPUT_BUF = 256;
-        struct Reader {
+        struct Reader { // NOLINT(cppcoreguidelines-pro-type-member-init)
             wil::unique_hfile file;
             wil::unique_event_nothrow ev;
             OVERLAPPED ov{};
-            std::array<uint8_t, MAX_DPI_INPUT_BUF> buf{};
+            std::array<uint8_t, MAX_DPI_INPUT_BUF> buf;
             DWORD buf_len = 0;
             bool pending = false;
         };
 
-        std::array<Reader, MAX_HID_COLLECTIONS> readers{};
+        std::array<Reader, MAX_HID_COLLECTIONS> readers; // NOLINT(cppcoreguidelines-pro-type-member-init)
         size_t reader_count = 0;
         for (const auto& c : dpi_collections_.span()) {
             if (c.input_len < 16 || c.input_len > MAX_DPI_INPUT_BUF) continue;
@@ -461,7 +461,7 @@ private:
         if (reader_count == 0) return;
 
         while (!dpi_stop_requested_.load(std::memory_order_acquire)) {
-            std::array<HANDLE, MAX_HID_COLLECTIONS + 1> handles{};
+            std::array<HANDLE, MAX_HID_COLLECTIONS + 1> handles; // NOLINT(cppcoreguidelines-pro-type-member-init)
             size_t handle_count = 0;
             if (dpi_stop_event_) handles[handle_count++] = dpi_stop_event_.get();
 
@@ -521,7 +521,7 @@ private:
     HHOOK hook_ = nullptr;
     std::array<uint32_t, MAX_HID_COLLECTIONS> raw_pages_{};
     size_t raw_pages_count_ = 0;
-    HidCollectionList dpi_collections_{};
+    HidCollectionList dpi_collections_; // NOLINT(cppcoreguidelines-pro-type-member-init)
     wil::unique_handle dpi_thread_;
     wil::unique_event_nothrow dpi_stop_event_;
     std::atomic<bool> dpi_stop_requested_{false};

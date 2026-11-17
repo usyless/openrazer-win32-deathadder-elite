@@ -295,7 +295,7 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
     json_scratch.clear();
     if (glz::write<JSON_WRITE>(s, json_scratch)) return false;
 
-    std::array<wchar_t, 512> tmp_buf{};
+    std::array<wchar_t, 512> tmp_buf; // NOLINT(cppcoreguidelines-pro-type-member-init)
     std::wstring tmp_heap;
     const wchar_t* tmp_ptr = nullptr;
     const int n = _snwprintf_s(

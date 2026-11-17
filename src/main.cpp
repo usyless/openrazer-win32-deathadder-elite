@@ -268,7 +268,7 @@ private:
             last_device_status_ = to_wide(mouse_.last_error());
         }
 
-        HidCollectionList cols{};
+        HidCollectionList cols; // NOLINT(cppcoreguidelines-pro-type-member-init)
         mouse_.copy_collections(cols);
         remapper_.configure(hwnd_, settings_, cols.span(), force_reconnect);
         update_tip();
@@ -390,7 +390,7 @@ private:
     }
 
     void update_tip() {
-        std::array<wchar_t, 128> tip{};
+        std::array<wchar_t, 128> tip; // NOLINT(cppcoreguidelines-pro-type-member-init)
         if (mouse_.is_connected()) {
             _snwprintf_s(tip.data(), tip.size(), _TRUNCATE, L"DeathAdder Elite — %u DPI • %u Hz",
                          static_cast<unsigned>(settings_.dpi_x),
@@ -399,7 +399,7 @@ private:
             wcscpy_s(tip.data(), tip.size(), L"DeathAdder Elite — Disconnected");
         }
         if (std::wcscmp(tip.data(), last_tip_.data()) == 0) return;
-        last_tip_ = tip;
+        wcscpy_s(last_tip_.data(), last_tip_.size(), tip.data());
 
         NOTIFYICONDATAW nid = tray_data();
         nid.uFlags = NIF_TIP | NIF_SHOWTIP;

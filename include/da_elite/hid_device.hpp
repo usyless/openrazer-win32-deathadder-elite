@@ -29,8 +29,8 @@ namespace da_elite {
 inline constexpr size_t MAX_HID_PATH_CHARS = 320;
 inline constexpr size_t MAX_HID_COLLECTIONS = 16;
 
-struct HidCollectionInfo {
-    std::array<wchar_t, MAX_HID_PATH_CHARS> path{};
+struct HidCollectionInfo { // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::array<wchar_t, MAX_HID_PATH_CHARS> path;
     size_t path_len = 0;
     int interface_num = -1;
     int collection_num = -1;
@@ -45,7 +45,7 @@ struct HidCollectionInfo {
 };
 
 struct HidCollectionList {
-    std::array<HidCollectionInfo, MAX_HID_COLLECTIONS> items{};
+    std::array<HidCollectionInfo, MAX_HID_COLLECTIONS> items; // NOLINT(cppcoreguidelines-pro-type-member-init)
     size_t count = 0;
 
     [[nodiscard]] std::span<const HidCollectionInfo> span() const noexcept { return {items.data(), count}; }
@@ -113,7 +113,6 @@ namespace detail {
     HIDP_CAPS caps{};
     if (HidP_GetCaps(preparsed, &caps) != HIDP_STATUS_SUCCESS) return false;
 
-    info = HidCollectionInfo{};
     std::memcpy(info.path.data(), path, (view.size() + 1) * sizeof(wchar_t));
     info.path_len = view.size();
     info.interface_num = parse_hex_tag(view, L"&mi_");
@@ -140,7 +139,7 @@ inline void enumerate_deathadder_collections(HidCollectionList& out) {
     SP_DEVICE_INTERFACE_DATA if_data{};
     if_data.cbSize = sizeof(if_data);
 
-    alignas(SP_DEVICE_INTERFACE_DETAIL_DATA_W) std::array<uint8_t, 1024> stack_buf{};
+    alignas(SP_DEVICE_INTERFACE_DETAIL_DATA_W) std::array<uint8_t, 1024> stack_buf; // NOLINT(cppcoreguidelines-pro-type-member-init)
     std::vector<uint8_t> heap_buf;
 
     for (DWORD idx = 0;
@@ -387,7 +386,7 @@ private:
 
     mutable std::mutex mu_;
     wil::unique_hfile handle_;
-    HidCollectionList collections_{};
+    HidCollectionList collections_; // NOLINT(cppcoreguidelines-pro-type-member-init)
     std::optional<HidCollectionInfo> control_info_;
     std::string last_error_;
 };
