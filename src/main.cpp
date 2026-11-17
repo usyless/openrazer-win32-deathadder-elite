@@ -259,7 +259,8 @@ private:
                 driver_mode_applied_ = false;
             }
             if (!poll_ok || !dpi_ok) {
-                last_device_status_ = L"Device write warning: " + to_wide(mouse_.last_error());
+                last_device_status_.clear();
+                append_to(last_device_status_, L"Device write warning: ", to_wide(mouse_.last_error()));
             } else {
                 last_device_status_.clear();
             }
@@ -316,16 +317,22 @@ private:
 
     [[nodiscard]] std::wstring build_status_text() {
         if (!mouse_.is_connected() && !mouse_.connect()) {
-            return L"Disconnected — " + to_wide(mouse_.last_error());
+            return ulp::str::concat_strings(L"Disconnected — ", to_wide(mouse_.last_error()));
         }
         const auto fw = mouse_.get_firmware_version();
         const auto poll = mouse_.get_polling_rate();
         const auto dpi = mouse_.get_dpi();
-        std::wstring s = L"Connected: DeathAdder Elite";
-        if (fw.has_value()) s += L" (" + to_wide(*fw) + L")";
-        if (dpi.has_value()) s += L" • " + std::to_wstring(dpi->first) + L" DPI";
-        if (poll.has_value()) s += L" • " + std::to_wstring(*poll) + L" Hz";
-        if (!last_device_status_.empty()) s += L" [" + last_device_status_ + L"]";
+        std::wstring s;
+        s.reserve(96);
+        s = L"Connected: DeathAdder Elite";
+        if (fw.has_value()) {
+            FixedWString<24> fw_w;
+            for (const char c : fw->view()) fw_w.push_back(static_cast<wchar_t>(c));
+            append_to(s, L" (", fw_w, L")");
+        }
+        if (dpi.has_value()) append_to(s, L" • ", to_fixed_wstr(dpi->first), L" DPI");
+        if (poll.has_value()) append_to(s, L" • ", to_fixed_wstr(*poll), L" Hz");
+        if (!last_device_status_.empty()) append_to(s, L" [", last_device_status_, L"]");
         return s;
     }
 
@@ -338,7 +345,8 @@ private:
                 if (!set_startup_enabled(settings_.launch_on_startup)) {
                     const DWORD err = GetLastError();
                     settings_.launch_on_startup = is_startup_enabled();
-                    const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
+                    const std::wstring msg = ulp::str::concat_strings(
+                        L"Failed to update Windows startup setting: ", to_wide(win32_error_utf8(err)));
                     MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 }
                 (void)save_settings(settings_, json_scratch_);
@@ -350,7 +358,8 @@ private:
             [this](bool enable) {
                 if (!set_startup_enabled(enable)) {
                     const DWORD err = GetLastError();
-                    const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
+                    const std::wstring msg = ulp::str::concat_strings(
+                        L"Failed to update Windows startup setting: ", to_wide(win32_error_utf8(err)));
                     MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 } else {
                     settings_.launch_on_startup = enable;
@@ -369,7 +378,7 @@ private:
     }
 
     void add_tray() {
-        last_tip_[0] = L'\0';
+        last_tip_.clear();
         NOTIFYICONDATAW nid = tray_data();
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_TRAY;
@@ -390,29 +399,37 @@ private:
     }
 
     void update_tip() {
-        std::array<wchar_t, 128> tip; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        FixedWString<128> tip;
         if (mouse_.is_connected()) {
-            _snwprintf_s(tip.data(), tip.size(), _TRUNCATE, L"DeathAdder Elite — %u DPI • %u Hz",
-                         static_cast<unsigned>(settings_.dpi_x),
-                         static_cast<unsigned>(settings_.polling_rate));
+            tip.assign(L"DeathAdder Elite — ");
+            tip.append(to_fixed_wstr(settings_.dpi_x));
+            tip.append(L" DPI • ");
+            tip.append(to_fixed_wstr(settings_.polling_rate));
+            tip.append(L" Hz");
         } else {
-            wcscpy_s(tip.data(), tip.size(), L"DeathAdder Elite — Disconnected");
+            tip.assign(L"DeathAdder Elite — Disconnected");
         }
-        if (std::wcscmp(tip.data(), last_tip_.data()) == 0) return;
-        wcscpy_s(last_tip_.data(), last_tip_.size(), tip.data());
+        if (tip.view() == last_tip_.view()) return;
+        last_tip_ = tip;
 
         NOTIFYICONDATAW nid = tray_data();
         nid.uFlags = NIF_TIP | NIF_SHOWTIP;
-        wcscpy_s(nid.szTip, tip.data());
+        wcscpy_s(nid.szTip, tip.c_str());
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
     void show_menu() {
         const wil::unique_hmenu menu{CreatePopupMenu()};
-        const std::wstring header = mouse_.is_connected()
-                                        ? (L"DeathAdder Elite • " + std::to_wstring(settings_.dpi_x) +
-                                           L" DPI • " + std::to_wstring(settings_.polling_rate) + L" Hz")
-                                        : L"DeathAdder Elite (Disconnected)";
+        FixedWString<128> header;
+        if (mouse_.is_connected()) {
+            header.assign(L"DeathAdder Elite • ");
+            header.append(to_fixed_wstr(settings_.dpi_x));
+            header.append(L" DPI • ");
+            header.append(to_fixed_wstr(settings_.polling_rate));
+            header.append(L" Hz");
+        } else {
+            header.assign(L"DeathAdder Elite (Disconnected)");
+        }
         AppendMenuW(menu.get(), MF_STRING | MF_DISABLED, 0, header.c_str());
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
 
@@ -430,7 +447,8 @@ private:
         for (size_t i = 0; i < settings_.dpi_stages.size(); ++i) {
             const uint16_t stage = settings_.dpi_stages[i];
             const UINT flags = MF_STRING | (settings_.dpi_x == stage ? MF_CHECKED : 0);
-            const std::wstring label = std::to_wstring(stage) + L" DPI";
+            FixedWString<32> label = to_fixed_wstr<32>(stage);
+            label.append(L" DPI");
             AppendMenuW(dpi_menu.get(), flags, IdStageBase + static_cast<UINT>(i), label.c_str());
         }
         AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(dpi_menu.get()), L"DPI Preset");
@@ -466,7 +484,8 @@ private:
                 const bool want = !settings_.launch_on_startup;
                 if (!set_startup_enabled(want)) {
                     const DWORD err = GetLastError();
-                    const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
+                    const std::wstring msg = ulp::str::concat_strings(
+                        L"Failed to update Windows startup setting: ", to_wide(win32_error_utf8(err)));
                     MessageBoxW(hwnd_, msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 } else {
                     settings_.launch_on_startup = want;
@@ -498,7 +517,7 @@ private:
     ButtonRemapper remapper_;
     ConfigWindow config_;
     wil::unique_hicon tray_icon_;
-    std::array<wchar_t, 128> last_tip_{};
+    FixedWString<128> last_tip_;
     std::wstring last_device_status_;
     std::string json_scratch_;
 };
@@ -561,17 +580,17 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
                 return 2;
             }
         } else if (a == L"--poll" && i + 1 < args.size()) {
-            const long v = std::wcstol(std::wstring{args[++i]}.c_str(), nullptr, 10);
+            const long v = parse_long(args[++i]).value_or(0);
             if (!protocol::is_valid_poll_rate(static_cast<uint16_t>(v))) {
                 std::println(stderr, "Invalid polling rate. Allowed: 125, 500, 1000");
                 return 2;
             }
             req_poll = static_cast<uint16_t>(v);
         } else if (a == L"--dpi" && i + 1 < args.size()) {
-            const long x = std::wcstol(std::wstring{args[++i]}.c_str(), nullptr, 10);
+            const long x = parse_long(args[++i]).value_or(0);
             long y = x;
             if (i + 1 < args.size() && !args[i + 1].starts_with(L'-')) {
-                y = std::wcstol(std::wstring{args[++i]}.c_str(), nullptr, 10);
+                y = parse_long(args[++i]).value_or(0);
             }
             req_dpi = std::pair{
                 protocol::clamp_dpi(static_cast<uint16_t>(std::clamp<long>(x, 100, 16000))),
@@ -639,9 +658,13 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
         const auto dpi = mouse.get_dpi();
         const auto mode = mouse.get_device_mode();
         std::println("Device:   Razer DeathAdder Elite (1532:005C)");
-        std::println("Firmware: {}", fw ? *fw : "unknown");
-        std::println("Serial:   {}", sn ? *sn : "unknown");
-        std::println("Polling:  {}", poll ? (std::to_string(*poll) + " Hz") : "unknown");
+        std::println("Firmware: {}", fw ? fw->view() : std::string_view{"unknown"});
+        std::println("Serial:   {}", sn ? sn->view() : std::string_view{"unknown"});
+        if (poll) {
+            std::println("Polling:  {} Hz", *poll);
+        } else {
+            std::println("Polling:  unknown");
+        }
         if (dpi) {
             std::println("DPI:      {} x {}", dpi->first, dpi->second);
         } else {
@@ -665,6 +688,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::vector<std::wstring_view> args;
     if (argv != nullptr) {
+        if (argc > 1) args.reserve(static_cast<size_t>(argc - 1));
         for (int i = 1; i < argc; ++i) {
             args.emplace_back(argv[i]);
         }

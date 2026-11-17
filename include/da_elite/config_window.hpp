@@ -34,17 +34,16 @@ namespace detail {
     return false;
 }
 
-[[nodiscard]] inline std::wstring format_stages_text(const std::vector<uint16_t>& stages) {
-    std::wstring out;
+inline void format_stages_text(const std::vector<uint16_t>& stages, std::wstring& out) {
+    out.clear();
     for (size_t i = 0; i < stages.size(); ++i) {
-        if (i > 0) out += L", ";
-        out += std::to_wstring(stages[i]);
+        if (i > 0) append_to(out, L", ", to_fixed_wstr(stages[i]));
+        else append_to(out, to_fixed_wstr(stages[i]));
     }
-    return out;
 }
 
-[[nodiscard]] inline std::vector<uint16_t> parse_stages_text(std::wstring_view text) {
-    std::vector<uint16_t> out;
+inline void parse_stages_text(std::wstring_view text, std::vector<uint16_t>& out) {
+    out.clear();
     size_t pos = 0;
     while (pos < text.size()) {
         while (pos < text.size() && (text[pos] == L' ' || text[pos] == L',' || text[pos] == L';')) {
@@ -56,16 +55,18 @@ namespace detail {
             ++end;
         }
         if (end > pos) {
-            const long v = std::wcstol(std::wstring{text.substr(pos, end - pos)}.c_str(), nullptr, 10);
+            uint32_t v = 0;
+            for (size_t i = pos; i < end; ++i) {
+                v = std::min<uint32_t>(65535u, (v * 10u) + static_cast<uint32_t>(text[i] - L'0'));
+            }
             if (v > 0) {
-                out.push_back(protocol::clamp_dpi(static_cast<uint16_t>(std::min<long>(v, 65535))));
+                out.push_back(protocol::clamp_dpi(static_cast<uint16_t>(v)));
             }
             pos = end;
         } else {
             ++pos;
         }
     }
-    return out;
 }
 
 [[nodiscard]] inline uint16_t read_uint16_edit(HWND edit, uint16_t fallback) {
@@ -188,8 +189,8 @@ public:
         draft_.dpi_y = latest.dpi_y;
         draft_.polling_rate = latest.polling_rate;
         draft_.launch_on_startup = latest.launch_on_startup;
-        SetWindowTextW(edit_dpi_x_, std::to_wstring(draft_.dpi_x).c_str());
-        SetWindowTextW(edit_dpi_y_, std::to_wstring(draft_.dpi_y).c_str());
+        SetWindowTextW(edit_dpi_x_, to_fixed_wstr(draft_.dpi_x).c_str());
+        SetWindowTextW(edit_dpi_y_, to_fixed_wstr(draft_.dpi_y).c_str());
         SendMessageW(chk_startup_, BM_SETCHECK, draft_.launch_on_startup ? BST_CHECKED : BST_UNCHECKED, 0);
         select_poll_combo(draft_.polling_rate);
         refresh_status();
@@ -390,11 +391,12 @@ private:
     void sync_controls_from_draft() {
         recording_btn_.reset();
         select_poll_combo(draft_.polling_rate);
-        SetWindowTextW(edit_dpi_x_, std::to_wstring(draft_.dpi_x).c_str());
-        SetWindowTextW(edit_dpi_y_, std::to_wstring(draft_.dpi_y).c_str());
+        SetWindowTextW(edit_dpi_x_, to_fixed_wstr(draft_.dpi_x).c_str());
+        SetWindowTextW(edit_dpi_y_, to_fixed_wstr(draft_.dpi_y).c_str());
         SendMessageW(chk_link_xy_, BM_SETCHECK, draft_.link_xy ? BST_CHECKED : BST_UNCHECKED, 0);
         EnableWindow(edit_dpi_y_, draft_.link_xy ? FALSE : TRUE);
-        SetWindowTextW(edit_stages_, detail::format_stages_text(draft_.dpi_stages).c_str());
+        detail::format_stages_text(draft_.dpi_stages, stages_scratch_);
+        SetWindowTextW(edit_stages_, stages_scratch_.c_str());
         SendMessageW(chk_startup_, BM_SETCHECK, draft_.launch_on_startup ? BST_CHECKED : BST_UNCHECKED, 0);
 
         for (size_t i = 0; i < 5; ++i) {
@@ -414,7 +416,7 @@ private:
         if (recording_btn_.has_value() && *recording_btn_ == btn_id) {
             SetWindowTextW(btn_keys_[i], L"Press any key...");
         } else if (is_key) {
-            const std::wstring label = (b.vk != 0) ? format_vk_label(b.mods, b.vk) : L"Click to Record";
+            const FixedWString<96> label = (b.vk != 0) ? format_vk_label(b.mods, b.vk) : FixedWString<96>{L"Click to Record"};
             SetWindowTextW(btn_keys_[i], label.c_str());
         } else {
             SetWindowTextW(btn_keys_[i], L"—");
@@ -432,8 +434,9 @@ private:
         draft_.dpi_y = draft_.link_xy ? draft_.dpi_x : detail::read_uint16_edit(edit_dpi_y_, draft_.dpi_y);
 
         std::array<wchar_t, 256> stage_buf{};
-        GetWindowTextW(edit_stages_, stage_buf.data(), static_cast<int>(stage_buf.size()));
-        draft_.dpi_stages = detail::parse_stages_text(stage_buf.data());
+        const int stage_len = GetWindowTextW(edit_stages_, stage_buf.data(), static_cast<int>(stage_buf.size()));
+        detail::parse_stages_text(std::wstring_view{stage_buf.data(), stage_len > 0 ? static_cast<size_t>(stage_len) : 0u},
+                                  draft_.dpi_stages);
         draft_.launch_on_startup = (SendMessageW(chk_startup_, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
         for (size_t i = 0; i < 5; ++i) {
@@ -442,7 +445,7 @@ private:
                                    ? static_cast<size_t>(sel)
                                    : 0;
             auto& b = get_binding(draft_.buttons, static_cast<ButtonId>(i));
-            b.kind = std::string{action_kind_name(detail::ACTION_ORDER[idx])};
+            b.kind = action_kind_name(detail::ACTION_ORDER[idx]);
         }
 
         sanitize_settings(draft_);
@@ -454,9 +457,10 @@ private:
     }
 
     void apply_preset(uint16_t dpi) {
-        SetWindowTextW(edit_dpi_x_, std::to_wstring(dpi).c_str());
+        const auto txt = to_fixed_wstr(dpi);
+        SetWindowTextW(edit_dpi_x_, txt.c_str());
         if (SendMessageW(chk_link_xy_, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            SetWindowTextW(edit_dpi_y_, std::to_wstring(dpi).c_str());
+            SetWindowTextW(edit_dpi_y_, txt.c_str());
         }
     }
 
@@ -507,7 +511,7 @@ private:
                     EnableWindow(edit_dpi_y_, linked ? FALSE : TRUE);
                     if (linked) {
                         const uint16_t x = detail::read_uint16_edit(edit_dpi_x_, draft_.dpi_x);
-                        SetWindowTextW(edit_dpi_y_, std::to_wstring(x).c_str());
+                        SetWindowTextW(edit_dpi_y_, to_fixed_wstr(x).c_str());
                     }
                     return 0;
                 }
@@ -529,7 +533,7 @@ private:
                     const ActionKind k = (sel >= 0 && static_cast<size_t>(sel) < detail::ACTION_ORDER.size())
                                              ? detail::ACTION_ORDER[static_cast<size_t>(sel)]
                                              : ActionKind::Default;
-                    get_binding(draft_.buttons, static_cast<ButtonId>(idx)).kind = std::string{action_kind_name(k)};
+                    get_binding(draft_.buttons, static_cast<ButtonId>(idx)).kind = action_kind_name(k);
                     if (recording_btn_.has_value() && *recording_btn_ == static_cast<ButtonId>(idx) && k != ActionKind::KeyCombo) {
                         recording_btn_.reset();
                     }
@@ -565,9 +569,9 @@ private:
                     read_controls_into_draft();
                     sync_controls_from_draft();
                     if (on_apply_) {
-                        std::wstring status;
-                        on_apply_(draft_, status);
-                        if (!status.empty()) SetWindowTextW(lbl_status_, status.c_str());
+                        status_scratch_.clear();
+                        on_apply_(draft_, status_scratch_);
+                        if (!status_scratch_.empty()) SetWindowTextW(lbl_status_, status_scratch_.c_str());
                     }
                     return 0;
                 }
@@ -627,6 +631,8 @@ private:
     HWND chk_startup_ = nullptr;
     std::array<HWND, 5> cmb_actions_{};
     std::array<HWND, 5> btn_keys_{};
+    std::wstring stages_scratch_;
+    std::wstring status_scratch_;
 };
 
 } // namespace da_elite

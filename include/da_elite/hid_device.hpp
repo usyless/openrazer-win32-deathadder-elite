@@ -232,16 +232,20 @@ public:
         return last_error_;
     }
 
-    [[nodiscard]] std::optional<std::string> get_firmware_version() {
+    [[nodiscard]] std::optional<FixedString<24>> get_firmware_version() {
         protocol::RazerReport resp{};
         if (!send_command(protocol::make_get_firmware_version(), resp)) return std::nullopt;
-        return "v" + std::to_string(resp.arguments[0]) + "." + std::to_string(resp.arguments[1]);
+        FixedString<24> out{"v"};
+        out.append(to_fixed_str(resp.arguments[0]));
+        out.push_back('.');
+        out.append(to_fixed_str(resp.arguments[1]));
+        return out;
     }
 
-    [[nodiscard]] std::optional<std::string> get_serial() {
+    [[nodiscard]] std::optional<FixedString<32>> get_serial() {
         protocol::RazerReport resp{};
         if (!send_command(protocol::make_get_serial(), resp)) return std::nullopt;
-        std::string serial;
+        FixedString<32> serial;
         for (size_t i = 0; i < 22; ++i) {
             const uint8_t ch = resp.arguments[i];
             if (ch == 0) break;
@@ -320,7 +324,8 @@ private:
         if (!any_control) {
             last_error_ = "Razer DeathAdder Elite (1532:005C) not found.";
         } else {
-            last_error_ = "Could not open HID control handle: " + win32_error_utf8(GetLastError());
+            last_error_.clear();
+            append_to(last_error_, "Could not open HID control handle: ", win32_error_utf8(GetLastError()));
         }
         return false;
     }
@@ -335,7 +340,8 @@ private:
 
             std::array<uint8_t, protocol::FEATURE_BUFFER_SIZE> out_buf = packed;
             if (!HidD_SetFeature(handle_.get(), out_buf.data(), static_cast<ULONG>(out_buf.size()))) {
-                last_error_ = "HidD_SetFeature failed: " + win32_error_utf8(GetLastError());
+                last_error_.clear();
+                append_to(last_error_, "HidD_SetFeature failed: ", win32_error_utf8(GetLastError()));
                 handle_.reset();
                 Sleep(10);
                 continue;
@@ -348,7 +354,8 @@ private:
                 std::array<uint8_t, protocol::FEATURE_BUFFER_SIZE> in_buf{};
                 in_buf[0] = 0x00;
                 if (!HidD_GetFeature(handle_.get(), in_buf.data(), static_cast<ULONG>(in_buf.size()))) {
-                    last_error_ = "HidD_GetFeature failed: " + win32_error_utf8(GetLastError());
+                    last_error_.clear();
+                    append_to(last_error_, "HidD_GetFeature failed: ", win32_error_utf8(GetLastError()));
                     handle_.reset();
                     got_reply = false;
                     break;
@@ -379,7 +386,7 @@ private:
         }
 
         if (last_error_.empty()) {
-            last_error_ = "Device command failed or timed out (status=" + std::to_string(response.status) + ").";
+            append_to(last_error_, "Device command failed or timed out (status=", to_fixed_str(response.status), ").");
         }
         return false;
     }

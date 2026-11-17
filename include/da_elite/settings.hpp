@@ -147,43 +147,51 @@ struct RuntimeBinding {
            is_binding_remapped(s.buttons.dpi_down);
 }
 
-[[nodiscard]] inline std::wstring format_vk_label(uint32_t mods, uint32_t vk) {
-    if (vk == 0) return L"(None)";
-    std::wstring t;
-    if ((mods & MOD_CONTROL) != 0) t += L"Ctrl+";
-    if ((mods & MOD_ALT) != 0) t += L"Alt+";
-    if ((mods & MOD_SHIFT) != 0) t += L"Shift+";
-    if ((mods & MOD_WIN) != 0) t += L"Win+";
+[[nodiscard]] inline FixedWString<96> format_vk_label(uint32_t mods, uint32_t vk) noexcept {
+    if (vk == 0) return FixedWString<96>{L"(None)"};
+    FixedWString<96> t;
+    if ((mods & MOD_CONTROL) != 0) t.append(L"Ctrl+");
+    if ((mods & MOD_ALT) != 0) t.append(L"Alt+");
+    if ((mods & MOD_SHIFT) != 0) t.append(L"Shift+");
+    if ((mods & MOD_WIN) != 0) t.append(L"Win+");
 
-    switch (vk) {
-        case VK_SPACE: return t + L"Space";
-        case VK_RETURN: return t + L"Enter";
-        case VK_TAB: return t + L"Tab";
-        case VK_BACK: return t + L"Backspace";
-        case VK_ESCAPE: return t + L"Esc";
-        case VK_DELETE: return t + L"Delete";
-        case VK_INSERT: return t + L"Insert";
-        case VK_HOME: return t + L"Home";
-        case VK_END: return t + L"End";
-        case VK_PRIOR: return t + L"Page Up";
-        case VK_NEXT: return t + L"Page Down";
-        case VK_UP: return t + L"Up";
-        case VK_DOWN: return t + L"Down";
-        case VK_LEFT: return t + L"Left";
-        case VK_RIGHT: return t + L"Right";
-        case VK_MEDIA_PLAY_PAUSE: return t + L"Play/Pause";
-        case VK_MEDIA_NEXT_TRACK: return t + L"Next Track";
-        case VK_MEDIA_PREV_TRACK: return t + L"Prev Track";
-        case VK_MEDIA_STOP: return t + L"Stop Media";
-        case VK_VOLUME_UP: return t + L"Volume Up";
-        case VK_VOLUME_DOWN: return t + L"Volume Down";
-        case VK_VOLUME_MUTE: return t + L"Mute";
-        case VK_BROWSER_BACK: return t + L"Browser Back";
-        case VK_BROWSER_FORWARD: return t + L"Browser Forward";
-        default: break;
+    const auto named_key = [](uint32_t code) noexcept -> std::wstring_view {
+        switch (code) {
+            case VK_SPACE: return L"Space";
+            case VK_RETURN: return L"Enter";
+            case VK_TAB: return L"Tab";
+            case VK_BACK: return L"Backspace";
+            case VK_ESCAPE: return L"Esc";
+            case VK_DELETE: return L"Delete";
+            case VK_INSERT: return L"Insert";
+            case VK_HOME: return L"Home";
+            case VK_END: return L"End";
+            case VK_PRIOR: return L"Page Up";
+            case VK_NEXT: return L"Page Down";
+            case VK_UP: return L"Up";
+            case VK_DOWN: return L"Down";
+            case VK_LEFT: return L"Left";
+            case VK_RIGHT: return L"Right";
+            case VK_MEDIA_PLAY_PAUSE: return L"Play/Pause";
+            case VK_MEDIA_NEXT_TRACK: return L"Next Track";
+            case VK_MEDIA_PREV_TRACK: return L"Prev Track";
+            case VK_MEDIA_STOP: return L"Stop Media";
+            case VK_VOLUME_UP: return L"Volume Up";
+            case VK_VOLUME_DOWN: return L"Volume Down";
+            case VK_VOLUME_MUTE: return L"Mute";
+            case VK_BROWSER_BACK: return L"Browser Back";
+            case VK_BROWSER_FORWARD: return L"Browser Forward";
+            default: return {};
+        }
+    };
+    if (const std::wstring_view name = named_key(vk); !name.empty()) {
+        t.append(name);
+        return t;
     }
     if (vk >= VK_F1 && vk <= VK_F24) {
-        return t + L"F" + std::to_wstring(vk - VK_F1 + 1);
+        t.push_back(L'F');
+        t.append(to_fixed_wstr(vk - VK_F1 + 1));
+        return t;
     }
 
     UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
@@ -194,10 +202,14 @@ struct RuntimeBinding {
     }
     std::array<wchar_t, 64> buf{};
     const uint32_t lparam_bits = static_cast<uint32_t>(scan) << 16u;
-    if (GetKeyNameTextW(static_cast<LONG>(lparam_bits), buf.data(), static_cast<int>(buf.size())) > 0) {
-        return t + buf.data();
+    const int n = GetKeyNameTextW(static_cast<LONG>(lparam_bits), buf.data(), static_cast<int>(buf.size()));
+    if (n > 0) {
+        t.append(std::wstring_view{buf.data(), static_cast<size_t>(n)});
+        return t;
     }
-    return t + L"VK_" + std::to_wstring(vk);
+    t.append(L"VK_");
+    t.append(to_fixed_wstr(vk));
+    return t;
 }
 
 inline void sanitize_settings(Settings& s) {
@@ -207,23 +219,19 @@ inline void sanitize_settings(Settings& s) {
     s.dpi_x = protocol::clamp_dpi(s.dpi_x);
     s.dpi_y = s.link_xy ? s.dpi_x : protocol::clamp_dpi(s.dpi_y);
 
-    std::vector<uint16_t> clean_stages;
-    clean_stages.reserve(s.dpi_stages.size());
-    for (const uint16_t stage : s.dpi_stages) {
-        const uint16_t clamped = protocol::clamp_dpi(stage);
-        if (std::ranges::find(clean_stages, clamped) == clean_stages.end()) {
-            clean_stages.push_back(clamped);
-        }
+    for (uint16_t& stage : s.dpi_stages) {
+        stage = protocol::clamp_dpi(stage);
     }
-    if (clean_stages.empty()) {
-        clean_stages = {400, 800, 1600, 3200};
+    std::ranges::sort(s.dpi_stages);
+    const auto dup = std::ranges::unique(s.dpi_stages);
+    s.dpi_stages.erase(dup.begin(), dup.end());
+    if (s.dpi_stages.empty()) {
+        s.dpi_stages = {400, 800, 1600, 3200};
     }
-    std::ranges::sort(clean_stages);
-    s.dpi_stages = std::move(clean_stages);
 
     for (size_t i = 0; i < static_cast<size_t>(ButtonId::Count); ++i) {
         auto& b = get_binding(s.buttons, static_cast<ButtonId>(i));
-        b.kind = std::string{action_kind_name(parse_action_kind(b.kind))};
+        b.kind = action_kind_name(parse_action_kind(b.kind));
     }
 }
 
@@ -250,7 +258,7 @@ inline bool set_startup_enabled(bool enable) {
         return false;
     }
     if (enable) {
-        const std::wstring cmd = L"\"" + exe_path().wstring() + L"\" --tray";
+        const std::wstring cmd = ulp::str::concat_strings(L"\"", exe_path().native(), L"\" --tray");
         st = RegSetValueExW(key, L"da-elite", 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(cmd.c_str()),
                             static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
@@ -276,14 +284,17 @@ inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
     std::error_code ec;
     const bool existed = fs::exists(path, ec);
     if (auto bytes = usylibpp::files::read_as_bytes(path)) {
-        const auto err = glz::read<JSON_READ>(s, *bytes);
+        thread_local glz::context ctx{};
+        const auto err = glz::read<JSON_READ>(s, *bytes, ctx);
         if (err && parse_ok != nullptr) *parse_ok = false;
     }
     sanitize_settings(s);
     s.launch_on_startup = is_startup_enabled();
     if (!existed) {
-        std::string scratch;
-        if (!glz::write<JSON_WRITE>(s, scratch)) {
+        thread_local std::string scratch;
+        thread_local glz::context ctx{};
+        scratch.clear();
+        if (!glz::write<JSON_WRITE>(s, scratch, ctx)) {
             (void)write_file_bytes(path.c_str(), scratch);
         }
     }
@@ -293,21 +304,24 @@ inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
 inline bool save_settings(const Settings& s, std::string& json_scratch) {
     const fs::path& path = settings_path();
     json_scratch.clear();
-    if (glz::write<JSON_WRITE>(s, json_scratch)) return false;
+    thread_local glz::context ctx{};
+    if (glz::write<JSON_WRITE>(s, json_scratch, ctx)) return false;
 
-    std::array<wchar_t, 512> tmp_buf; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    FixedWString<512> tmp_stack;
     std::wstring tmp_heap;
+    const auto pid = to_fixed_wstr(GetCurrentProcessId());
+    const auto tid = to_fixed_wstr(GetCurrentThreadId());
+    const std::wstring_view pview = path.native();
     const wchar_t* tmp_ptr = nullptr;
-    const int n = _snwprintf_s(
-        tmp_buf.data(), tmp_buf.size(), _TRUNCATE, L"%ls.tmp.%lu.%lu",
-        path.c_str(), static_cast<unsigned long>(GetCurrentProcessId()),
-        static_cast<unsigned long>(GetCurrentThreadId()));
-    if (n > 0) {
-        tmp_ptr = tmp_buf.data();
+    if (pview.size() + 5 + pid.size() + 1 + tid.size() <= tmp_stack.capacity()) {
+        tmp_stack.assign(pview);
+        tmp_stack.append(L".tmp.");
+        tmp_stack.append(pid);
+        tmp_stack.push_back(L'.');
+        tmp_stack.append(tid);
+        tmp_ptr = tmp_stack.c_str();
     } else {
-        tmp_heap = path.wstring() + L".tmp." +
-                   std::to_wstring(GetCurrentProcessId()) + L"." +
-                   std::to_wstring(GetCurrentThreadId());
+        tmp_heap = ulp::str::concat_strings(pview, L".tmp.", pid, L".", tid);
         tmp_ptr = tmp_heap.c_str();
     }
 
@@ -322,7 +336,7 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
 }
 
 inline bool save_settings(const Settings& s) {
-    std::string scratch;
+    thread_local std::string scratch;
     return save_settings(s, scratch);
 }
 

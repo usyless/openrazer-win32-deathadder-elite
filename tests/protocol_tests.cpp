@@ -125,19 +125,49 @@ int main() try {
         Settings s{};
         std::string scratch;
         scratch.reserve(2048);
+        glz::context ctx{};
         [[maybe_unused]] const char* const initial_ptr = scratch.data();
         [[maybe_unused]] const size_t initial_cap = scratch.capacity();
-        [[maybe_unused]] const auto err1 = glz::write<JSON_WRITE>(s, scratch);
+        [[maybe_unused]] const auto err1 = glz::write<JSON_WRITE>(s, scratch, ctx);
         assert(!err1);
         assert(!scratch.empty());
         assert(scratch.data() == initial_ptr);
         assert(scratch.capacity() == initial_cap);
         s.dpi_x = 1600;
         scratch.clear();
-        [[maybe_unused]] const auto err2 = glz::write<JSON_WRITE>(s, scratch);
+        [[maybe_unused]] const auto err2 = glz::write<JSON_WRITE>(s, scratch, ctx);
         assert(!err2);
         assert(scratch.data() == initial_ptr);
         assert(scratch.capacity() == initial_cap);
+
+        // FixedString / FixedWString / to_fixed_str / to_fixed_wstr / append_to / concat_strings
+        FixedString<8> fs{"hello"};
+        assert(fs == "hello");
+        fs.append(" world");
+        assert(fs == "hello w"); // truncated at capacity N - 1 = 7
+        assert(fs.size() == 7);
+
+        const auto n_str = to_fixed_str(1600);
+        assert(n_str == "1600");
+        const auto f_str = to_fixed_str(12.5, 1);
+        assert(f_str == "12.5");
+        const auto w_str = to_fixed_wstr(1000u);
+        assert(w_str == L"1000");
+        const auto fw_str = to_fixed_wstr(3.25, 2);
+        assert(fw_str == L"3.25");
+
+        const std::wstring joined = ulp::str::concat_strings(L"DPI=", w_str, L", Hz=", to_fixed_wstr(500));
+        assert(joined == L"DPI=1000, Hz=500");
+
+        std::string app = "abc";
+        append_to(app, "-", std::string_view{app}.substr(0, 2), "-", to_fixed_str(42));
+        assert(app == "abc-ab-42");
+
+        assert(format_vk_label(MOD_CONTROL | MOD_SHIFT, VK_F5) == L"Ctrl+Shift+F5");
+        assert(format_vk_label(0, 0) == L"(None)");
+        assert(parse_long(L"1600") == 1600);
+        assert(!parse_long(L"abc").has_value());
+        assert(to_wide(to_utf8(L"DeathAdder Elite — 800 DPI")) == L"DeathAdder Elite — 800 DPI");
     }
 
     std::println("All protocol & settings tests passed.");
