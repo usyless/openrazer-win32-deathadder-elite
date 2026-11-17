@@ -7,6 +7,7 @@
 
 #include <commctrl.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <uxtheme.h>
 #include <wil/resource.h>
 
@@ -243,6 +244,7 @@ private:
         IdStartup = 1011,
         IdApply = 1012,
         IdClose = 1013,
+        IdReleases = 1014,
         IdBtnActionBase = 1100, // +0..4
         IdBtnKeyBase = 1200,    // +0..4
     };
@@ -328,16 +330,16 @@ private:
         SendMessageW(cmb_poll_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"500 Hz (2 ms)"));
         SendMessageW(cmb_poll_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"125 Hz (8 ms)"));
 
-        make_ctrl(WC_STATICW, L"DPI X:", SS_LEFT | SS_CENTERIMAGE, 0, 28, 100, 44, 22, 0);
-        edit_dpi_x_ = make_ctrl(WC_EDITW, L"800", ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 76, 99, 64, 23, IdDpiX);
-        make_ctrl(WC_STATICW, L"DPI Y:", SS_LEFT | SS_CENTERIMAGE, 0, 152, 100, 44, 22, 0);
-        edit_dpi_y_ = make_ctrl(WC_EDITW, L"800", ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 200, 99, 64, 23, IdDpiY);
-        chk_link_xy_ = make_ctrl(WC_BUTTONW, L"Link X/Y", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 276, 100, 74, 22, IdLinkXy);
+        make_ctrl(WC_STATICW, L"DPI X:", SS_LEFT | SS_CENTERIMAGE, 0, 28, 100, 38, 22, 0);
+        edit_dpi_x_ = make_ctrl(WC_EDITW, L"800", ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 68, 99, 54, 23, IdDpiX);
+        make_ctrl(WC_STATICW, L"DPI Y:", SS_LEFT | SS_CENTERIMAGE, 0, 130, 100, 38, 22, 0);
+        edit_dpi_y_ = make_ctrl(WC_EDITW, L"800", ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 170, 99, 54, 23, IdDpiY);
+        chk_link_xy_ = make_ctrl(WC_BUTTONW, L"Link X/Y", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 232, 100, 74, 22, IdLinkXy);
 
-        make_ctrl(WC_BUTTONW, L"400", BS_PUSHBUTTON, 0, 354, 98, 30, 24, IdPreset400);
-        make_ctrl(WC_BUTTONW, L"800", BS_PUSHBUTTON, 0, 386, 98, 30, 24, IdPreset800);
-        make_ctrl(WC_BUTTONW, L"1600", BS_PUSHBUTTON, 0, 418, 98, 34, 24, IdPreset1600);
-        make_ctrl(WC_BUTTONW, L"3200", BS_PUSHBUTTON, 0, 454, 98, 34, 24, IdPreset3200);
+        make_ctrl(WC_BUTTONW, L"400", BS_PUSHBUTTON, 0, 330, 98, 31, 24, IdPreset400);
+        make_ctrl(WC_BUTTONW, L"800", BS_PUSHBUTTON, 0, 363, 98, 31, 24, IdPreset800);
+        make_ctrl(WC_BUTTONW, L"1600", BS_PUSHBUTTON, 0, 396, 98, 36, 24, IdPreset1600);
+        make_ctrl(WC_BUTTONW, L"3200", BS_PUSHBUTTON, 0, 434, 98, 36, 24, IdPreset3200);
 
         make_ctrl(WC_STATICW, L"DPI Stages:", SS_LEFT | SS_CENTERIMAGE, 0, 28, 134, 86, 22, 0);
         edit_stages_ = make_ctrl(WC_EDITW, L"400, 800, 1600, 3200", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 118, 133, 352, 23, IdStages);
@@ -369,9 +371,10 @@ private:
                   SS_LEFT, 0, 28, 378, 444, 24, 0);
 
         // Footer
-        chk_startup_ = make_ctrl(WC_BUTTONW, L"Launch on Windows startup", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 424, 220, 24, IdStartup);
-        make_ctrl(WC_BUTTONW, L"Apply && Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 286, 422, 108, 28, IdApply);
-        make_ctrl(WC_BUTTONW, L"Hide to Tray", BS_PUSHBUTTON | WS_TABSTOP, 0, 400, 422, 86, 28, IdClose);
+        chk_startup_ = make_ctrl(WC_BUTTONW, L"Launch on Windows startup", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 424, 180, 24, IdStartup);
+        make_ctrl(WC_BUTTONW, L"Latest Release", BS_PUSHBUTTON | WS_TABSTOP, 0, 200, 422, 92, 28, IdReleases);
+        make_ctrl(WC_BUTTONW, L"Apply && Save", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 298, 422, 98, 28, IdApply);
+        make_ctrl(WC_BUTTONW, L"Hide to Tray", BS_PUSHBUTTON | WS_TABSTOP, 0, 402, 422, 84, 28, IdClose);
 
         sync_controls_from_draft();
         refresh_status();
@@ -566,6 +569,13 @@ private:
                         on_apply_(draft_, status);
                         if (!status.empty()) SetWindowTextW(lbl_status_, status.c_str());
                     }
+                    return 0;
+                }
+                if (id == IdReleases) {
+                    ShellExecuteW(
+                        hwnd, L"open",
+                        L"https://github.com/usyless/openrazer-win32-deathadder-elite/releases",
+                        nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
                 }
                 if (id == IdClose) {
