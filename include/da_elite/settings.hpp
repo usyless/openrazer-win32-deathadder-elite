@@ -284,17 +284,14 @@ inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
     std::error_code ec;
     const bool existed = fs::exists(path, ec);
     if (auto bytes = usylibpp::files::read_as_bytes(path)) {
-        thread_local glz::context ctx{};
-        const auto err = glz::read<JSON_READ>(s, *bytes, ctx);
+        const auto err = glz::read<JSON_READ>(s, *bytes);
         if (err && parse_ok != nullptr) *parse_ok = false;
     }
     sanitize_settings(s);
     s.launch_on_startup = is_startup_enabled();
     if (!existed) {
-        thread_local std::string scratch;
-        thread_local glz::context ctx{};
-        scratch.clear();
-        if (!glz::write<JSON_WRITE>(s, scratch, ctx)) {
+        std::string scratch;
+        if (!glz::write<JSON_WRITE>(s, scratch)) {
             (void)write_file_bytes(path.c_str(), scratch);
         }
     }
@@ -304,8 +301,7 @@ inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
 inline bool save_settings(const Settings& s, std::string& json_scratch) {
     const fs::path& path = settings_path();
     json_scratch.clear();
-    thread_local glz::context ctx{};
-    if (glz::write<JSON_WRITE>(s, json_scratch, ctx)) return false;
+    if (glz::write<JSON_WRITE>(s, json_scratch)) return false;
 
     FixedWString<512> tmp_stack;
     std::wstring tmp_heap;
@@ -313,7 +309,7 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
     const auto tid = to_fixed_wstr(GetCurrentThreadId());
     const std::wstring_view pview = path.native();
     const wchar_t* tmp_ptr = nullptr;
-    if (pview.size() + 5 + pid.size() + 1 + tid.size() <= tmp_stack.capacity()) {
+    if (pview.size() + 5 + pid.size() + 1 + tid.size() <= FixedWString<512>::capacity()) {
         tmp_stack.assign(pview);
         tmp_stack.append(L".tmp.");
         tmp_stack.append(pid);
@@ -336,7 +332,7 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
 }
 
 inline bool save_settings(const Settings& s) {
-    thread_local std::string scratch;
+    std::string scratch;
     return save_settings(s, scratch);
 }
 

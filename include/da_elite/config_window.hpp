@@ -37,8 +37,11 @@ namespace detail {
 inline void format_stages_text(const std::vector<uint16_t>& stages, std::wstring& out) {
     out.clear();
     for (size_t i = 0; i < stages.size(); ++i) {
-        if (i > 0) append_to(out, L", ", to_fixed_wstr(stages[i]));
-        else append_to(out, to_fixed_wstr(stages[i]));
+        if (i > 0) {
+            append_to(out, L", ", to_fixed_wstr(stages[i]));
+        } else {
+            append_to(out, to_fixed_wstr(stages[i]));
+        }
     }
 }
 
@@ -71,11 +74,11 @@ inline void parse_stages_text(std::wstring_view text, std::vector<uint16_t>& out
 
 [[nodiscard]] inline uint16_t read_uint16_edit(HWND edit, uint16_t fallback) {
     std::array<wchar_t, 32> buf{};
-    GetWindowTextW(edit, buf.data(), static_cast<int>(buf.size()));
-    wchar_t* end = nullptr;
-    const long v = std::wcstol(buf.data(), &end, 10);
-    if (end == buf.data() || v <= 0) return fallback;
-    return static_cast<uint16_t>(std::min<long>(v, 65535));
+    const int len = GetWindowTextW(edit, buf.data(), static_cast<int>(buf.size()));
+    if (len <= 0) return fallback;
+    const auto v = parse_long(std::wstring_view{buf.data(), static_cast<size_t>(len)});
+    if (!v.has_value() || *v <= 0) return fallback;
+    return static_cast<uint16_t>(std::min<long>(*v, 65535));
 }
 
 inline constexpr std::array<ActionKind, 10> ACTION_ORDER = {
@@ -120,7 +123,7 @@ inline constexpr std::array<ActionKind, 10> ACTION_ORDER = {
 class ConfigWindow {
 public:
     using ApplyCallback = std::function<bool(const Settings&, std::wstring& status_out)>;
-    using StatusCallback = std::function<std::wstring()>;
+    using StatusCallback = std::function<void(std::wstring& status_out)>;
     using StartupCallback = std::function<bool(bool)>;
 
     ConfigWindow() = default;
@@ -453,7 +456,9 @@ private:
 
     void refresh_status() {
         if (lbl_status_ == nullptr || !on_status_) return;
-        SetWindowTextW(lbl_status_, on_status_().c_str());
+        status_scratch_.clear();
+        on_status_(status_scratch_);
+        SetWindowTextW(lbl_status_, status_scratch_.c_str());
     }
 
     void apply_preset(uint16_t dpi) {

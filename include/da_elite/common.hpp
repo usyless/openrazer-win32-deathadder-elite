@@ -158,6 +158,18 @@ using FixedString = FixedBasicString<char, N>;
 template <size_t N>
 using FixedWString = FixedBasicString<wchar_t, N>;
 
+template <typename Char, size_t N, size_t M>
+[[nodiscard]] constexpr bool operator==(const FixedBasicString<Char, N>& a,
+                                        const FixedBasicString<Char, M>& b) noexcept {
+    return a.view() == b.view();
+}
+
+template <typename Char, size_t N, size_t M>
+[[nodiscard]] constexpr auto operator<=>(const FixedBasicString<Char, N>& a,
+                                         const FixedBasicString<Char, M>& b) noexcept {
+    return a.view() <=> b.view();
+}
+
 /// Appends `parts...` onto `dst` in one capacity check without creating intermediate strings.
 template <typename Char, typename... Ts>
 constexpr void append_to(std::basic_string<Char>& dst, const Ts&... parts) {
@@ -289,14 +301,6 @@ template <size_t N = 48, std::floating_point T>
     return find_ascii_icase(haystack, needle) != std::wstring_view::npos;
 }
 
-[[nodiscard]] inline std::wstring lower_wide(std::wstring_view s) {
-    std::wstring out{s};
-    if (!out.empty()) {
-        CharLowerBuffW(out.data(), static_cast<DWORD>(out.size()));
-    }
-    return out;
-}
-
 inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcept {
     if (path == nullptr) return false;
     const wil::unique_hfile h{CreateFileW(
@@ -348,7 +352,7 @@ inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcep
             if (done) break;
             cap *= 2;
         }
-        return fs::path{buf};
+        return fs::path{std::move(buf)};
     }();
     return p;
 }

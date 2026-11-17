@@ -315,25 +315,25 @@ private:
         config_.update_status_from_service(settings_);
     }
 
-    [[nodiscard]] std::wstring build_status_text() {
+    void build_status_text(std::wstring& out) {
+        out.clear();
         if (!mouse_.is_connected() && !mouse_.connect()) {
-            return ulp::str::concat_strings(L"Disconnected — ", to_wide(mouse_.last_error()));
+            append_to(out, L"Disconnected — ", to_wide(mouse_.last_error()));
+            return;
         }
         const auto fw = mouse_.get_firmware_version();
         const auto poll = mouse_.get_polling_rate();
         const auto dpi = mouse_.get_dpi();
-        std::wstring s;
-        s.reserve(96);
-        s = L"Connected: DeathAdder Elite";
+        if (out.capacity() < 96) out.reserve(96);
+        out = L"Connected: DeathAdder Elite";
         if (fw.has_value()) {
             FixedWString<24> fw_w;
             for (const char c : fw->view()) fw_w.push_back(static_cast<wchar_t>(c));
-            append_to(s, L" (", fw_w, L")");
+            append_to(out, L" (", fw_w, L")");
         }
-        if (dpi.has_value()) append_to(s, L" • ", to_fixed_wstr(dpi->first), L" DPI");
-        if (poll.has_value()) append_to(s, L" • ", to_fixed_wstr(*poll), L" Hz");
-        if (!last_device_status_.empty()) append_to(s, L" [", last_device_status_, L"]");
-        return s;
+        if (dpi.has_value()) append_to(out, L" • ", to_fixed_wstr(dpi->first), L" DPI");
+        if (poll.has_value()) append_to(out, L" • ", to_fixed_wstr(*poll), L" Hz");
+        if (!last_device_status_.empty()) append_to(out, L" [", last_device_status_, L"]");
     }
 
     void open_config() {
@@ -351,10 +351,10 @@ private:
                 }
                 (void)save_settings(settings_, json_scratch_);
                 apply_all_to_device(false);
-                status_out = build_status_text();
+                build_status_text(status_out);
                 return true;
             },
-            [this] { return build_status_text(); },
+            [this](std::wstring& out) { build_status_text(out); },
             [this](bool enable) {
                 if (!set_startup_enabled(enable)) {
                     const DWORD err = GetLastError();
@@ -581,7 +581,7 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
             }
         } else if (a == L"--poll" && i + 1 < args.size()) {
             const long v = parse_long(args[++i]).value_or(0);
-            if (!protocol::is_valid_poll_rate(static_cast<uint16_t>(v))) {
+            if (v <= 0 || v > 65535 || !protocol::is_valid_poll_rate(static_cast<uint16_t>(v))) {
                 std::println(stderr, "Invalid polling rate. Allowed: 125, 500, 1000");
                 return 2;
             }
