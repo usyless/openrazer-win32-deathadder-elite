@@ -11,8 +11,8 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <stop_token>
-#include <thread>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace da_elite {
@@ -55,7 +55,8 @@ namespace detail {
     }
 }
 
-inline void append_key_input(std::vector<INPUT>& inputs, uint16_t vk, bool down) {
+inline void append_key_input(std::array<INPUT, 6>& inputs, size_t& count, uint16_t vk, bool down) noexcept {
+    if (count >= inputs.size()) return;
     INPUT in{};
     in.type = INPUT_KEYBOARD;
     in.ki.wVk = vk;
@@ -63,65 +64,66 @@ inline void append_key_input(std::vector<INPUT>& inputs, uint16_t vk, bool down)
     DWORD flags = down ? 0 : KEYEVENTF_KEYUP;
     if (is_extended_vk(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
     in.ki.dwFlags = flags;
-    inputs.push_back(in);
+    inputs[count++] = in;
 }
 
-inline void append_mouse_input(std::vector<INPUT>& inputs, DWORD flags, DWORD mouse_data = 0) {
+inline void append_mouse_input(std::array<INPUT, 6>& inputs, size_t& count,
+                               DWORD flags, DWORD mouse_data = 0) noexcept {
+    if (count >= inputs.size()) return;
     INPUT in{};
     in.type = INPUT_MOUSE;
     in.mi.dwFlags = flags;
     in.mi.mouseData = mouse_data;
-    inputs.push_back(in);
+    inputs[count++] = in;
 }
 
-inline void send_binding_event(const ButtonBinding& binding, bool is_down) {
-    const ActionKind kind = parse_action_kind(binding.kind);
-    std::vector<INPUT> inputs;
-    inputs.reserve(6);
+inline void send_binding_event(const RuntimeBinding& binding, bool is_down) noexcept {
+    std::array<INPUT, 6> inputs{};
+    size_t count = 0;
 
-    switch (kind) {
+    switch (binding.kind) {
         case ActionKind::Default:
         case ActionKind::Disabled:
         case ActionKind::DpiCycleUp:
         case ActionKind::DpiCycleDown:
             return;
         case ActionKind::MouseLeft:
-            append_mouse_input(inputs, is_down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP);
+            append_mouse_input(inputs, count, is_down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP);
             break;
         case ActionKind::MouseRight:
-            append_mouse_input(inputs, is_down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
+            append_mouse_input(inputs, count, is_down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP);
             break;
         case ActionKind::MouseMiddle:
-            append_mouse_input(inputs, is_down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP);
+            append_mouse_input(inputs, count, is_down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP);
             break;
         case ActionKind::MouseX1:
-            append_mouse_input(inputs, is_down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP, XBUTTON1);
+            append_mouse_input(inputs, count, is_down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP, XBUTTON1);
             break;
         case ActionKind::MouseX2:
-            append_mouse_input(inputs, is_down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP, XBUTTON2);
+            append_mouse_input(inputs, count, is_down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP, XBUTTON2);
             break;
         case ActionKind::KeyCombo: {
             if (binding.vk == 0) return;
             const auto vk = static_cast<uint16_t>(binding.vk);
             if (is_down) {
-                if ((binding.mods & MOD_CONTROL) != 0) append_key_input(inputs, VK_CONTROL, true);
-                if ((binding.mods & MOD_ALT) != 0) append_key_input(inputs, VK_MENU, true);
-                if ((binding.mods & MOD_SHIFT) != 0) append_key_input(inputs, VK_SHIFT, true);
-                if ((binding.mods & MOD_WIN) != 0) append_key_input(inputs, VK_LWIN, true);
-                append_key_input(inputs, vk, true);
+                if ((binding.mods & MOD_CONTROL) != 0) append_key_input(inputs, count, VK_CONTROL, true);
+                if ((binding.mods & MOD_ALT) != 0) append_key_input(inputs, count, VK_MENU, true);
+                if ((binding.mods & MOD_SHIFT) != 0) append_key_input(inputs, count, VK_SHIFT, true);
+                if ((binding.mods & MOD_WIN) != 0) append_key_input(inputs, count, VK_LWIN, true);
+                append_key_input(inputs, count, vk, true);
             } else {
-                append_key_input(inputs, vk, false);
-                if ((binding.mods & MOD_WIN) != 0) append_key_input(inputs, VK_LWIN, false);
-                if ((binding.mods & MOD_SHIFT) != 0) append_key_input(inputs, VK_SHIFT, false);
-                if ((binding.mods & MOD_ALT) != 0) append_key_input(inputs, VK_MENU, false);
-                if ((binding.mods & MOD_CONTROL) != 0) append_key_input(inputs, VK_CONTROL, false);
+                append_key_input(inputs, count, vk, false);
+                if ((binding.mods & MOD_WIN) != 0) append_key_input(inputs, count, VK_LWIN, false);
+                if ((binding.mods & MOD_SHIFT) != 0) append_key_input(inputs, count, VK_SHIFT, false);
+                if ((binding.mods & MOD_ALT) != 0) append_key_input(inputs, count, VK_MENU, false);
+                if ((binding.mods & MOD_CONTROL) != 0) append_key_input(inputs, count, VK_CONTROL, false);
             }
             break;
         }
     }
 
-    if (!inputs.empty()) {
-        SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+    if (count > 0) {
+        SendInput(static_cast<UINT>(count), inputs.data(), sizeof(INPUT));
     }
 }
 
@@ -139,11 +141,14 @@ public:
     ButtonRemapper(ButtonRemapper&&) = delete;
     ButtonRemapper& operator=(ButtonRemapper&&) = delete;
 
-    void configure(HWND target_hwnd, const Settings& settings) {
+    void configure(HWND target_hwnd, const Settings& settings,
+                   std::span<const HidCollectionInfo> collections, bool force_restart_dpi = false) {
         target_hwnd_.store(target_hwnd, std::memory_order_relaxed);
         {
             const std::scoped_lock lock{mu_};
-            mappings_ = settings.buttons;
+            for (size_t i = 0; i < mappings_.size(); ++i) {
+                mappings_[i] = to_runtime_binding(get_binding(settings.buttons, static_cast<ButtonId>(i)));
+            }
         }
 
         remapped_mouse_[0].store(is_binding_remapped(settings.buttons.middle), std::memory_order_relaxed);
@@ -157,7 +162,8 @@ public:
         }
 
         if (any_driver_mode_needed(settings)) {
-            start_dpi_listener();
+            if (force_restart_dpi) stop_dpi_listener();
+            start_dpi_listener(collections);
         } else {
             stop_dpi_listener();
         }
@@ -178,17 +184,17 @@ public:
 
     /// Executes a remapped button event on the service message thread.
     /// Returns +1 for DpiCycleUp, -1 for DpiCycleDown, or 0 otherwise.
-    [[nodiscard]] int dispatch_event(ButtonId btn, bool is_down) {
-        ButtonBinding binding{};
-        {
+    [[nodiscard]] int dispatch_event(ButtonId btn, bool is_down) noexcept {
+        RuntimeBinding binding{};
+        const auto idx = static_cast<size_t>(btn);
+        if (idx < mappings_.size()) {
             const std::scoped_lock lock{mu_};
-            binding = get_binding(mappings_, btn);
+            binding = mappings_[idx];
         }
-        const ActionKind kind = parse_action_kind(binding.kind);
-        if (kind == ActionKind::DpiCycleUp) {
+        if (binding.kind == ActionKind::DpiCycleUp) {
             return is_down ? 1 : 0;
         }
-        if (kind == ActionKind::DpiCycleDown) {
+        if (binding.kind == ActionKind::DpiCycleDown) {
             return is_down ? -1 : 0;
         }
         detail::send_binding_event(binding, is_down);
@@ -202,11 +208,17 @@ public:
         if (GetRawInputData(lparam, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size == 0) {
             return;
         }
-        std::vector<uint8_t> buf(size, 0);
-        if (GetRawInputData(lparam, RID_INPUT, buf.data(), &size, sizeof(RAWINPUTHEADER)) != size) {
+        std::array<uint8_t, 512> stack_buf{};
+        std::vector<uint8_t> heap_buf;
+        uint8_t* raw_buf = stack_buf.data();
+        if (size > stack_buf.size()) {
+            heap_buf.resize(size);
+            raw_buf = heap_buf.data();
+        }
+        if (GetRawInputData(lparam, RID_INPUT, raw_buf, &size, sizeof(RAWINPUTHEADER)) != size) {
             return;
         }
-        const auto* raw = reinterpret_cast<const RAWINPUT*>(buf.data());
+        const auto* raw = reinterpret_cast<const RAWINPUT*>(raw_buf);
         if (raw->header.dwType != RIM_TYPEHID) return;
 
         RID_DEVICE_INFO info{};
@@ -319,53 +331,82 @@ private:
         std::ranges::copy(data, prev_rep4_.begin());
     }
 
-    void start_dpi_listener() {
-        if (dpi_thread_.joinable()) return;
+    static DWORD WINAPI dpi_thread_proc(LPVOID param) noexcept {
+        static_cast<ButtonRemapper*>(param)->dpi_reader_loop();
+        return 0;
+    }
+
+    void start_dpi_listener(std::span<const HidCollectionInfo> collections) noexcept {
+        if (dpi_thread_) {
+            if (WaitForSingleObject(dpi_thread_.get(), 0) != WAIT_OBJECT_0) {
+                return;
+            }
+            dpi_thread_.reset();
+        }
         prev_rep4_.fill(0);
-        register_raw_hid_fallback();
+        register_raw_hid_fallback(collections);
+
+        dpi_collections_.count = 0;
+        for (const auto& c : collections) {
+            if (dpi_collections_.count >= MAX_HID_COLLECTIONS) break;
+            dpi_collections_.items[dpi_collections_.count++] = c;
+        }
+
+        dpi_stop_requested_.store(false, std::memory_order_relaxed);
         dpi_stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
-        dpi_thread_ = std::jthread([this](const std::stop_token& st) { dpi_reader_loop(st); });
+        dpi_thread_.reset(CreateThread(nullptr, 0, &ButtonRemapper::dpi_thread_proc, this, 0, nullptr));
     }
 
     void stop_dpi_listener() noexcept {
         unregister_raw_hid_fallback();
+        dpi_stop_requested_.store(true, std::memory_order_release);
         if (dpi_stop_event_) SetEvent(dpi_stop_event_.get());
-        if (dpi_thread_.joinable()) {
-            dpi_thread_.request_stop();
-            dpi_thread_.join();
+        if (dpi_thread_) {
+            WaitForSingleObject(dpi_thread_.get(), INFINITE);
+            dpi_thread_.reset();
         }
         dpi_stop_event_.reset();
         direct_reader_active_.store(false, std::memory_order_relaxed);
         dpi_listener_open_.store(false, std::memory_order_relaxed);
     }
 
-    void register_raw_hid_fallback() {
+    void register_raw_hid_fallback(std::span<const HidCollectionInfo> cols) noexcept {
         HWND target = target_hwnd_.load(std::memory_order_relaxed);
-        if (target == nullptr || !raw_pages_.empty()) return;
-        const auto cols = DeathAdderEliteDevice::list_collections();
-        std::vector<RAWINPUTDEVICE> rids;
+        if (target == nullptr || raw_pages_count_ > 0) return;
+
+        std::array<RAWINPUTDEVICE, MAX_HID_COLLECTIONS> rids{};
+        size_t rid_count = 0;
         for (const auto& c : cols) {
             if (c.input_len < 16) continue;
             // Skip standard mouse/keyboard TLCs; register vendor or generic non-kbd/mouse TLCs.
             if (c.usage_page == 0x01 && (c.usage == 0x02 || c.usage == 0x06)) continue;
             const uint32_t key = (static_cast<uint32_t>(c.usage_page) << 16u) | c.usage;
-            if (std::ranges::find(raw_pages_, key) != raw_pages_.end()) continue;
-            raw_pages_.push_back(key);
+            bool seen = false;
+            for (size_t i = 0; i < raw_pages_count_; ++i) {
+                if (raw_pages_[i] == key) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen || raw_pages_count_ >= raw_pages_.size()) continue;
+            raw_pages_[raw_pages_count_++] = key;
+
             RAWINPUTDEVICE rid{};
             rid.usUsagePage = c.usage_page;
             rid.usUsage = c.usage;
             rid.dwFlags = RIDEV_INPUTSINK;
             rid.hwndTarget = target;
-            rids.push_back(rid);
+            rids[rid_count++] = rid;
         }
-        if (!rids.empty()) {
-            RegisterRawInputDevices(rids.data(), static_cast<UINT>(rids.size()), sizeof(RAWINPUTDEVICE));
+        if (rid_count > 0) {
+            RegisterRawInputDevices(rids.data(), static_cast<UINT>(rid_count), sizeof(RAWINPUTDEVICE));
         }
     }
 
     void unregister_raw_hid_fallback() noexcept {
-        if (raw_pages_.empty()) return;
-        for (const uint32_t key : raw_pages_) {
+        if (raw_pages_count_ == 0) return;
+        for (size_t i = 0; i < raw_pages_count_; ++i) {
+            const uint32_t key = raw_pages_[i];
             RAWINPUTDEVICE rid{};
             rid.usUsagePage = static_cast<USHORT>(key >> 16u);
             rid.usUsage = static_cast<USHORT>(key & 0xFFFFu);
@@ -373,50 +414,54 @@ private:
             rid.hwndTarget = nullptr;
             RegisterRawInputDevices(&rid, 1, sizeof(RAWINPUTDEVICE));
         }
-        raw_pages_.clear();
+        raw_pages_count_ = 0;
     }
 
-    void dpi_reader_loop(const std::stop_token& st) {
+    void dpi_reader_loop() noexcept {
+        static constexpr size_t MAX_DPI_INPUT_BUF = 256;
         struct Reader {
             wil::unique_hfile file;
             wil::unique_event_nothrow ev;
             OVERLAPPED ov{};
-            std::vector<uint8_t> buf;
+            std::array<uint8_t, MAX_DPI_INPUT_BUF> buf{};
+            DWORD buf_len = 0;
             bool pending = false;
         };
 
-        std::vector<Reader> readers;
-        for (const auto& c : DeathAdderEliteDevice::list_collections()) {
-            if (c.input_len < 16) continue;
+        std::array<Reader, MAX_HID_COLLECTIONS> readers{};
+        size_t reader_count = 0;
+        for (const auto& c : dpi_collections_.span()) {
+            if (c.input_len < 16 || c.input_len > MAX_DPI_INPUT_BUF) continue;
+            if (reader_count >= readers.size()) break;
             wil::unique_hfile h{CreateFileW(
-                c.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                c.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                 nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr)};
             if (!h) continue;
             HidD_SetNumInputBuffers(h.get(), 64);
-            Reader r{};
+            Reader& r = readers[reader_count++];
             r.file = std::move(h);
             r.ev.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
             r.ov.hEvent = r.ev.get();
-            r.buf.resize(c.input_len, 0);
-            readers.push_back(std::move(r));
+            r.buf_len = c.input_len;
         }
 
-        direct_reader_active_.store(!readers.empty(), std::memory_order_relaxed);
-        dpi_listener_open_.store(!readers.empty() || !raw_pages_.empty(), std::memory_order_relaxed);
-        if (readers.empty()) return;
+        direct_reader_active_.store(reader_count > 0, std::memory_order_relaxed);
+        dpi_listener_open_.store(reader_count > 0 || raw_pages_count_ > 0, std::memory_order_relaxed);
+        if (reader_count == 0) return;
 
-        while (!st.stop_requested()) {
-            std::vector<HANDLE> handles;
-            handles.reserve(readers.size() + 1);
-            if (dpi_stop_event_) handles.push_back(dpi_stop_event_.get());
+        while (!dpi_stop_requested_.load(std::memory_order_acquire)) {
+            std::array<HANDLE, MAX_HID_COLLECTIONS + 1> handles{};
+            size_t handle_count = 0;
+            if (dpi_stop_event_) handles[handle_count++] = dpi_stop_event_.get();
 
-            for (auto& r : readers) {
+            for (size_t i = 0; i < reader_count; ++i) {
+                Reader& r = readers[i];
                 if (!r.pending) {
                     ResetEvent(r.ev.get());
                     r.ov = OVERLAPPED{};
                     r.ov.hEvent = r.ev.get();
                     DWORD got = 0;
-                    const BOOL ok = ReadFile(r.file.get(), r.buf.data(), static_cast<DWORD>(r.buf.size()), &got, &r.ov);
+                    const BOOL ok = ReadFile(r.file.get(), r.buf.data(), r.buf_len, &got, &r.ov);
                     if (ok) {
                         if (got >= 16 && r.buf[0] == 0x04) {
                             process_rep4(std::span<const uint8_t, 16>{r.buf.data(), 16});
@@ -429,14 +474,15 @@ private:
                         continue;
                     }
                 }
-                handles.push_back(r.ev.get());
+                handles[handle_count++] = r.ev.get();
             }
 
-            if (handles.empty()) break;
-            const DWORD wait = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+            if (handle_count == 0) break;
+            const DWORD wait = WaitForMultipleObjects(static_cast<DWORD>(handle_count), handles.data(), FALSE, INFINITE);
             if (dpi_stop_event_ && wait == WAIT_OBJECT_0) break;
 
-            for (auto& r : readers) {
+            for (size_t i = 0; i < reader_count; ++i) {
+                Reader& r = readers[i];
                 if (!r.pending) continue;
                 DWORD got = 0;
                 if (GetOverlappedResult(r.file.get(), &r.ov, &got, FALSE)) {
@@ -450,20 +496,23 @@ private:
             }
         }
 
-        for (auto& r : readers) {
-            if (r.pending) CancelIoEx(r.file.get(), &r.ov);
+        for (size_t i = 0; i < reader_count; ++i) {
+            if (readers[i].pending) CancelIoEx(readers[i].file.get(), &readers[i].ov);
         }
     }
 
     std::mutex mu_;
     std::atomic<HWND> target_hwnd_{nullptr};
-    ButtonMappings mappings_{};
+    std::array<RuntimeBinding, static_cast<size_t>(ButtonId::Count)> mappings_{};
     std::array<std::atomic<bool>, 3> remapped_mouse_{};
     std::array<uint8_t, 16> prev_rep4_{};
     HHOOK hook_ = nullptr;
-    std::vector<uint32_t> raw_pages_;
-    std::jthread dpi_thread_;
+    std::array<uint32_t, MAX_HID_COLLECTIONS> raw_pages_{};
+    size_t raw_pages_count_ = 0;
+    HidCollectionList dpi_collections_{};
+    wil::unique_handle dpi_thread_;
     wil::unique_event_nothrow dpi_stop_event_;
+    std::atomic<bool> dpi_stop_requested_{false};
     std::atomic<bool> direct_reader_active_{false};
     std::atomic<bool> dpi_listener_open_{false};
 };

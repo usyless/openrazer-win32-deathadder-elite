@@ -23,7 +23,6 @@ include(CTest)
 include(FetchContent)
 
 ##### Options
-option(DA_ELITE_USE_MIMALLOC "Replace default allocator with mimalloc" ON)
 option(DA_ELITE_USE_INTERPROCEDURAL_OPTIMIZATION "Enable FLTO/LTCG" ON)
 cmake_dependent_option(DA_ELITE_USE_STATIC_MSVCRT
     "Use the static release/debug MSVCRT - or set the flag yourself before including the project" ON
@@ -41,17 +40,12 @@ endmacro()
 
 set_tracked_cache_version(DA_ELITE_USYLIBPP_VERSION "main" "usylibpp git tag/branch")
 set_tracked_cache_version(DA_ELITE_GLAZE_VERSION "v9.1.0" "glaze git tag")
-set_tracked_cache_version(DA_ELITE_MIMALLOC_VERSION "v3.5.3" "Version (git tag/branch) to use for mimalloc")
 
 # Status Reports
 if(WIN32)
     message(STATUS "[${PROJECT_NAME}] Using static MSVCRT: ${DA_ELITE_USE_STATIC_MSVCRT} (DA_ELITE_USE_STATIC_MSVCRT)")
 endif()
 message(STATUS "[${PROJECT_NAME}] Using interprocedural optimization: ${DA_ELITE_USE_INTERPROCEDURAL_OPTIMIZATION} (DA_ELITE_USE_INTERPROCEDURAL_OPTIMIZATION)")
-message(STATUS "[${PROJECT_NAME}] Using mimalloc: ${DA_ELITE_USE_MIMALLOC} (DA_ELITE_USE_MIMALLOC)")
-if(DA_ELITE_USE_MIMALLOC)
-    message(STATUS "[${PROJECT_NAME}] Using mimalloc version: ${DA_ELITE_MIMALLOC_VERSION} (DA_ELITE_MIMALLOC_VERSION)")
-endif()
 
 if(DA_ELITE_USE_STATIC_MSVCRT)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -136,38 +130,6 @@ if(MSVC)
     target_link_options(da_elite_common INTERFACE
         $<$<CONFIG:Debug>:/DEBUG>
         $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>
-    )
-endif()
-
-# mimalloc Configuration
-if(DA_ELITE_USE_MIMALLOC)
-    target_compile_definitions(da_elite_common INTERFACE
-        DA_ELITE_USE_MIMALLOC
-    )
-
-    if(WIN32)
-        if(NOT CMAKE_MSVC_RUNTIME_LIBRARY OR CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
-            message(WARNING "[${PROJECT_NAME}] mimalloc static overloading on Windows requires the static CRT runtime (/MT). Currently CMAKE_MSVC_RUNTIME_LIBRARY is '${CMAKE_MSVC_RUNTIME_LIBRARY}' (defaults to /MD).")
-        endif()
-    endif()
-
-    set(MI_OVERRIDE ON CACHE BOOL "" FORCE)
-    set(MI_BUILD_OBJECT ON CACHE BOOL "" FORCE)
-    set(MI_BUILD_STATIC OFF CACHE BOOL "" FORCE)
-    set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-    set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-
-    FetchContent_Declare(
-        mimalloc
-        GIT_REPOSITORY https://github.com/microsoft/mimalloc.git
-        GIT_TAG "${DA_ELITE_MIMALLOC_VERSION}"
-        EXCLUDE_FROM_ALL
-        SYSTEM
-    )
-    FetchContent_MakeAvailable(mimalloc)
-
-    target_link_libraries(da_elite_common INTERFACE
-        mimalloc-obj
     )
 endif()
 

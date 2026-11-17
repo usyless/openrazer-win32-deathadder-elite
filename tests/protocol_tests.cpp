@@ -106,6 +106,38 @@ int main() try {
         assert(!is_startup_enabled());
     }
 
+    // 7. Zero-allocation helpers (ASCII case-insensitive match, RuntimeBinding, Glaze scratch reuse)
+    {
+        assert(contains_ascii_icase(L"\\\\?\\HID#VID_1532&PID_005C&MI_00", L"vid_1532"));
+        assert(contains_ascii_icase(L"\\\\?\\hid#vid_1532&pid_005c&mi_00", L"PID_005C"));
+        assert(!contains_ascii_icase(L"\\\\?\\HID#VID_1532&PID_005D", L"pid_005c"));
+        assert(find_ascii_icase(L"abc&MI_02&Col01", L"&mi_") == 3);
+
+        ButtonBinding bb{};
+        bb.kind = "key";
+        bb.vk = VK_SPACE;
+        bb.mods = MOD_CONTROL | MOD_SHIFT;
+        const RuntimeBinding rb = to_runtime_binding(bb);
+        assert(rb.kind == ActionKind::KeyCombo);
+        assert(rb.vk == VK_SPACE);
+        assert(rb.mods == (MOD_CONTROL | MOD_SHIFT));
+
+        Settings s{};
+        std::string scratch;
+        scratch.reserve(2048);
+        const char* const initial_ptr = scratch.data();
+        const size_t initial_cap = scratch.capacity();
+        assert(!glz::write<JSON_WRITE>(s, scratch));
+        assert(!scratch.empty());
+        assert(scratch.data() == initial_ptr);
+        assert(scratch.capacity() == initial_cap);
+        s.dpi_x = 1600;
+        scratch.clear();
+        assert(!glz::write<JSON_WRITE>(s, scratch));
+        assert(scratch.data() == initial_ptr);
+        assert(scratch.capacity() == initial_cap);
+    }
+
     std::println("All protocol & settings tests passed.");
     return 0;
 } catch (...) {

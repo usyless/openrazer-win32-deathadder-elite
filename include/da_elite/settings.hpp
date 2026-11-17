@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cwchar>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -111,6 +112,20 @@ struct Settings {
         case ButtonId::Count: break;
     }
     return m.middle;
+}
+
+struct RuntimeBinding {
+    ActionKind kind = ActionKind::Default;
+    uint32_t vk = 0;
+    uint32_t mods = 0;
+};
+
+[[nodiscard]] inline RuntimeBinding to_runtime_binding(const ButtonBinding& b) noexcept {
+    return RuntimeBinding{
+        .kind = parse_action_kind(b.kind),
+        .vk = b.vk,
+        .mods = b.mods,
+    };
 }
 
 [[nodiscard]] inline bool is_binding_remapped(const ButtonBinding& b) noexcept {
@@ -256,7 +271,7 @@ inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
 [[nodiscard]] inline Settings load_settings(bool* parse_ok = nullptr) {
     Settings s{};
     if (parse_ok != nullptr) *parse_ok = true;
-    const fs::path path = settings_path();
+    const fs::path& path = settings_path();
     std::error_code ec;
     const bool existed = fs::exists(path, ec);
     if (auto bytes = usylibpp::files::read_as_bytes(path)) {
@@ -266,30 +281,48 @@ inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
     sanitize_settings(s);
     s.launch_on_startup = is_startup_enabled();
     if (!existed) {
-        if (auto out = glz::write<JSON_WRITE>(s)) {
-            (void)usylibpp::files::write(path, std::string_view{*out});
+        std::string scratch;
+        if (!glz::write<JSON_WRITE>(s, scratch)) {
+            (void)write_file_bytes(path.c_str(), scratch);
         }
     }
     return s;
 }
 
-inline bool save_settings(const Settings& s) {
-    const fs::path path = settings_path();
-    const auto out = glz::write<JSON_WRITE>(s);
-    if (!out) return false;
+inline bool save_settings(const Settings& s, std::string& json_scratch) {
+    const fs::path& path = settings_path();
+    json_scratch.clear();
+    if (glz::write<JSON_WRITE>(s, json_scratch)) return false;
 
-    const fs::path tmp = path.wstring() + L".tmp." +
-                         std::to_wstring(GetCurrentProcessId()) + L"." +
-                         std::to_wstring(GetCurrentThreadId());
-    if (!usylibpp::files::write(tmp, std::string_view{*out})) return false;
-    if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
+    std::array<wchar_t, 512> tmp_buf{};
+    std::wstring tmp_heap;
+    const wchar_t* tmp_ptr = nullptr;
+    const int n = _snwprintf_s(
+        tmp_buf.data(), tmp_buf.size(), _TRUNCATE, L"%ls.tmp.%lu.%lu",
+        path.c_str(), static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long>(GetCurrentThreadId()));
+    if (n > 0) {
+        tmp_ptr = tmp_buf.data();
+    } else {
+        tmp_heap = path.wstring() + L".tmp." +
+                   std::to_wstring(GetCurrentProcessId()) + L"." +
+                   std::to_wstring(GetCurrentThreadId());
+        tmp_ptr = tmp_heap.c_str();
+    }
+
+    if (!write_file_bytes(tmp_ptr, json_scratch)) return false;
+    if (MoveFileExW(tmp_ptr, path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
         return true;
     }
     const DWORD err = GetLastError();
-    std::error_code ec;
-    fs::remove(tmp, ec);
+    DeleteFileW(tmp_ptr);
     SetLastError(err);
     return false;
+}
+
+inline bool save_settings(const Settings& s) {
+    std::string scratch;
+    return save_settings(s, scratch);
 }
 
 } // namespace da_elite

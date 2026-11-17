@@ -5,6 +5,7 @@
 #include <usylibpp/usylibpp.hpp>
 
 #include <windows.h>
+#include <wil/resource.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -48,12 +49,51 @@ enum class AppCmd : uint32_t {
     return out;
 }
 
+[[nodiscard]] constexpr wchar_t fold_ascii_lower(wchar_t c) noexcept {
+    return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c + (L'a' - L'A')) : c;
+}
+
+[[nodiscard]] constexpr size_t find_ascii_icase(std::wstring_view haystack, std::wstring_view needle) noexcept {
+    if (needle.empty()) return 0;
+    if (needle.size() > haystack.size()) return std::wstring_view::npos;
+    const size_t limit = haystack.size() - needle.size();
+    for (size_t i = 0; i <= limit; ++i) {
+        size_t j = 0;
+        while (j < needle.size() && fold_ascii_lower(haystack[i + j]) == fold_ascii_lower(needle[j])) {
+            ++j;
+        }
+        if (j == needle.size()) return i;
+    }
+    return std::wstring_view::npos;
+}
+
+[[nodiscard]] constexpr bool contains_ascii_icase(std::wstring_view haystack, std::wstring_view needle) noexcept {
+    return find_ascii_icase(haystack, needle) != std::wstring_view::npos;
+}
+
 [[nodiscard]] inline std::wstring lower_wide(std::wstring_view s) {
     std::wstring out{s};
     if (!out.empty()) {
         CharLowerBuffW(out.data(), static_cast<DWORD>(out.size()));
     }
     return out;
+}
+
+inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcept {
+    const wil::unique_hfile h{CreateFileW(
+        path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (!h) return false;
+    size_t written_total = 0;
+    while (written_total < data.size()) {
+        const size_t remaining = data.size() - written_total;
+        const DWORD chunk = static_cast<DWORD>(remaining > 0x7FFF'FFFFu ? 0x7FFF'FFFFu : remaining);
+        DWORD wrote = 0;
+        if (!WriteFile(h.get(), data.data() + written_total, chunk, &wrote, nullptr) || wrote == 0) {
+            return false;
+        }
+        written_total += wrote;
+    }
+    return true;
 }
 
 [[nodiscard]] inline std::string win32_error_utf8(DWORD err) {
@@ -103,8 +143,9 @@ enum class AppCmd : uint32_t {
     return p;
 }
 
-[[nodiscard]] inline fs::path settings_path() {
-    return data_dir() / L"settings.json";
+[[nodiscard]] inline const fs::path& settings_path() {
+    static const fs::path p = data_dir() / L"settings.json";
+    return p;
 }
 
 [[nodiscard]] inline HWND find_service_window() noexcept {

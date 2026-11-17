@@ -13,8 +13,10 @@
 #include <wil/resource.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <optional>
 #include <print>
 #include <string>
@@ -65,6 +67,7 @@ public:
 
     bool init(HINSTANCE inst, bool show_ui) {
         inst_ = inst;
+        json_scratch_.reserve(2048);
         settings_ = load_settings();
         taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
 
@@ -227,8 +230,8 @@ private:
         const auto* hdr = reinterpret_cast<const DEV_BROADCAST_HDR*>(lp);
         if (hdr == nullptr || hdr->dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE) return;
         const auto* dev = reinterpret_cast<const DEV_BROADCAST_DEVICEINTERFACE_W*>(lp);
-        const std::wstring lower = lower_wide(dev->dbcc_name);
-        if (!lower.contains(L"vid_1532") || !lower.contains(L"pid_005c")) {
+        const std::wstring_view dev_name{dev->dbcc_name};
+        if (!contains_ascii_icase(dev_name, L"vid_1532") || !contains_ascii_icase(dev_name, L"pid_005c")) {
             return;
         }
         if (wp == DBT_DEVICEREMOVECOMPLETE) {
@@ -265,7 +268,9 @@ private:
             last_device_status_ = to_wide(mouse_.last_error());
         }
 
-        remapper_.configure(hwnd_, settings_);
+        HidCollectionList cols{};
+        mouse_.copy_collections(cols);
+        remapper_.configure(hwnd_, settings_, cols.span(), force_reconnect);
         update_tip();
         config_.update_status_from_service(settings_);
     }
@@ -290,7 +295,7 @@ private:
     void set_quick_dpi(uint16_t dpi) {
         settings_.dpi_x = protocol::clamp_dpi(dpi);
         settings_.dpi_y = settings_.link_xy ? settings_.dpi_x : settings_.dpi_y;
-        (void)save_settings(settings_);
+        (void)save_settings(settings_, json_scratch_);
         if (mouse_.is_connected() || mouse_.connect()) {
             (void)mouse_.set_dpi(settings_.dpi_x, settings_.dpi_y);
         }
@@ -301,7 +306,7 @@ private:
     void set_quick_poll(uint16_t hz) {
         if (!protocol::is_valid_poll_rate(hz)) return;
         settings_.polling_rate = hz;
-        (void)save_settings(settings_);
+        (void)save_settings(settings_, json_scratch_);
         if (mouse_.is_connected() || mouse_.connect()) {
             (void)mouse_.set_polling_rate(hz);
         }
@@ -336,7 +341,7 @@ private:
                     const std::wstring msg = L"Failed to update Windows startup setting: " + to_wide(win32_error_utf8(err));
                     MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 }
-                (void)save_settings(settings_);
+                (void)save_settings(settings_, json_scratch_);
                 apply_all_to_device(false);
                 status_out = build_status_text();
                 return true;
@@ -349,7 +354,7 @@ private:
                     MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 } else {
                     settings_.launch_on_startup = enable;
-                    (void)save_settings(settings_);
+                    (void)save_settings(settings_, json_scratch_);
                 }
                 settings_.launch_on_startup = is_startup_enabled();
                 return settings_.launch_on_startup;
@@ -364,7 +369,7 @@ private:
     }
 
     void add_tray() {
-        last_tip_.clear();
+        last_tip_[0] = L'\0';
         NOTIFYICONDATAW nid = tray_data();
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         nid.uCallbackMessage = WM_TRAY;
@@ -385,20 +390,20 @@ private:
     }
 
     void update_tip() {
-        std::wstring tip = L"DeathAdder Elite — ";
+        std::array<wchar_t, 128> tip{};
         if (mouse_.is_connected()) {
-            tip += std::to_wstring(settings_.dpi_x) + L" DPI • " +
-                   std::to_wstring(settings_.polling_rate) + L" Hz";
+            _snwprintf_s(tip.data(), tip.size(), _TRUNCATE, L"DeathAdder Elite — %u DPI • %u Hz",
+                         static_cast<unsigned>(settings_.dpi_x),
+                         static_cast<unsigned>(settings_.polling_rate));
         } else {
-            tip += L"Disconnected";
+            wcscpy_s(tip.data(), tip.size(), L"DeathAdder Elite — Disconnected");
         }
-        if (tip.size() >= 127) tip.resize(127);
-        if (tip == last_tip_) return;
+        if (std::wcscmp(tip.data(), last_tip_.data()) == 0) return;
         last_tip_ = tip;
 
         NOTIFYICONDATAW nid = tray_data();
         nid.uFlags = NIF_TIP | NIF_SHOWTIP;
-        wcscpy_s(nid.szTip, tip.c_str());
+        wcscpy_s(nid.szTip, tip.data());
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
@@ -465,7 +470,7 @@ private:
                     MessageBoxW(hwnd_, msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 } else {
                     settings_.launch_on_startup = want;
-                    (void)save_settings(settings_);
+                    (void)save_settings(settings_, json_scratch_);
                 }
                 config_.update_status_from_service(settings_);
                 break;
@@ -493,8 +498,9 @@ private:
     ButtonRemapper remapper_;
     ConfigWindow config_;
     wil::unique_hicon tray_icon_;
-    std::wstring last_tip_;
+    std::array<wchar_t, 128> last_tip_{};
     std::wstring last_device_status_;
+    std::string json_scratch_;
 };
 
 void attach_parent_console_if_present() noexcept {
