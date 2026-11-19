@@ -185,6 +185,9 @@ int main() try {
         DA_CHECK(!parse_long(L"1000abc").has_value());
         DA_CHECK(!parse_long(L"12345678901234567890123456789012").has_value());
         DA_CHECK(to_wide(to_utf8(L"DeathAdder Elite — 800 DPI")) == L"DeathAdder Elite — 800 DPI");
+        std::wstring appended = L"Err: ";
+        append_utf8_as_wide(appended, to_utf8(L"DeathAdder Elite — ok"));
+        DA_CHECK(appended == L"Err: DeathAdder Elite — ok");
         DA_CHECK(!exe_path().empty());
     }
 

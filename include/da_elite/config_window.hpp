@@ -34,15 +34,13 @@ namespace detail {
     return false;
 }
 
-inline void format_stages_text(const std::vector<uint16_t>& stages, std::wstring& out) {
-    out.clear();
+[[nodiscard]] inline FixedWString<256> format_stages_text(const std::vector<uint16_t>& stages) noexcept {
+    FixedWString<256> out;
     for (size_t i = 0; i < stages.size(); ++i) {
-        if (i > 0) {
-            append_to(out, L", ", to_fixed_wstr(stages[i]));
-        } else {
-            append_to(out, to_fixed_wstr(stages[i]));
-        }
+        if (i > 0) out.append(L", ");
+        out.append(to_fixed_wstr(stages[i]));
     }
+    return out;
 }
 
 inline void parse_stages_text(std::wstring_view text, std::vector<uint16_t>& out) {
@@ -186,17 +184,20 @@ public:
         return hwnd_ != nullptr && IsWindow(hwnd_) != FALSE;
     }
 
-    void update_status_from_service(const Settings& latest) {
+    void update_status_from_service(const Settings& latest, bool refresh_device_status = true) {
         if (!is_open()) return;
         draft_.dpi_x = latest.dpi_x;
         draft_.dpi_y = latest.dpi_y;
+        draft_.link_xy = latest.link_xy;
         draft_.polling_rate = latest.polling_rate;
         draft_.launch_on_startup = latest.launch_on_startup;
+        SendMessageW(chk_link_xy_, BM_SETCHECK, draft_.link_xy ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(edit_dpi_y_, draft_.link_xy ? FALSE : TRUE);
         SetWindowTextW(edit_dpi_x_, to_fixed_wstr(draft_.dpi_x).c_str());
         SetWindowTextW(edit_dpi_y_, to_fixed_wstr(draft_.dpi_y).c_str());
         SendMessageW(chk_startup_, BM_SETCHECK, draft_.launch_on_startup ? BST_CHECKED : BST_UNCHECKED, 0);
         select_poll_combo(draft_.polling_rate);
-        refresh_status();
+        if (refresh_device_status) refresh_status();
     }
 
     /// Intercepts key presses while recording a button shortcut. Returns true if consumed.
@@ -262,10 +263,13 @@ private:
         wc.lpszClassName = CONFIG_CLASS;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = nullptr;
-        wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
-        wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
-        RegisterClassExW(&wc);
-        registered = true;
+        wc.hIcon = static_cast<HICON>(
+            LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR | LR_SHARED));
+        wc.hIconSm = static_cast<HICON>(
+            LoadImageW(inst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR | LR_SHARED));
+        if (RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS) {
+            registered = true;
+        }
     }
 
     static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -398,8 +402,8 @@ private:
         SetWindowTextW(edit_dpi_y_, to_fixed_wstr(draft_.dpi_y).c_str());
         SendMessageW(chk_link_xy_, BM_SETCHECK, draft_.link_xy ? BST_CHECKED : BST_UNCHECKED, 0);
         EnableWindow(edit_dpi_y_, draft_.link_xy ? FALSE : TRUE);
-        detail::format_stages_text(draft_.dpi_stages, stages_scratch_);
-        SetWindowTextW(edit_stages_, stages_scratch_.c_str());
+        const FixedWString<256> stages_txt = detail::format_stages_text(draft_.dpi_stages);
+        SetWindowTextW(edit_stages_, stages_txt.c_str());
         SendMessageW(chk_startup_, BM_SETCHECK, draft_.launch_on_startup ? BST_CHECKED : BST_UNCHECKED, 0);
 
         for (size_t i = 0; i < 5; ++i) {
@@ -507,7 +511,7 @@ private:
             case WM_COMMAND: {
                 const int id = LOWORD(wp);
                 const int code = HIWORD(wp);
-                if (id == IdRefresh) {
+                if (id == IdRefresh && code == BN_CLICKED) {
                     refresh_status();
                     return 0;
                 }
@@ -527,10 +531,10 @@ private:
                     SetWindowTextW(edit_dpi_y_, buf.data());
                     return 0;
                 }
-                if (id == IdPreset400) { apply_preset(400); return 0; }
-                if (id == IdPreset800) { apply_preset(800); return 0; }
-                if (id == IdPreset1600) { apply_preset(1600); return 0; }
-                if (id == IdPreset3200) { apply_preset(3200); return 0; }
+                if (id == IdPreset400 && code == BN_CLICKED) { apply_preset(400); return 0; }
+                if (id == IdPreset800 && code == BN_CLICKED) { apply_preset(800); return 0; }
+                if (id == IdPreset1600 && code == BN_CLICKED) { apply_preset(1600); return 0; }
+                if (id == IdPreset3200 && code == BN_CLICKED) { apply_preset(3200); return 0; }
 
                 if (id >= IdBtnActionBase && id < IdBtnActionBase + 5 && code == CBN_SELCHANGE) {
                     const auto idx = static_cast<size_t>(id - IdBtnActionBase);
@@ -570,7 +574,7 @@ private:
                     }
                     return 0;
                 }
-                if (id == IdApply) {
+                if (id == IdApply && code == BN_CLICKED) {
                     read_controls_into_draft();
                     sync_controls_from_draft();
                     if (on_apply_) {
@@ -580,14 +584,14 @@ private:
                     }
                     return 0;
                 }
-                if (id == IdReleases) {
+                if (id == IdReleases && code == BN_CLICKED) {
                     ShellExecuteW(
                         hwnd, L"open",
                         L"https://github.com/usyless/openrazer-win32-deathadder-elite/releases",
                         nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
                 }
-                if (id == IdClose) {
+                if (id == IdClose && code == BN_CLICKED) {
                     DestroyWindow(hwnd);
                     return 0;
                 }
@@ -600,10 +604,24 @@ private:
 
             case WM_DESTROY:
                 recording_btn_.reset();
+                return 0;
+
+            case WM_NCDESTROY:
+                // Free GDI objects only after all child controls have been destroyed.
                 font_.reset();
                 bg_brush_.reset();
                 edit_brush_.reset();
+                lbl_status_ = nullptr;
+                cmb_poll_ = nullptr;
+                edit_dpi_x_ = nullptr;
+                edit_dpi_y_ = nullptr;
+                chk_link_xy_ = nullptr;
+                edit_stages_ = nullptr;
+                chk_startup_ = nullptr;
+                cmb_actions_.fill(nullptr);
+                btn_keys_.fill(nullptr);
                 hwnd_ = nullptr;
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
                 return 0;
 
@@ -636,7 +654,6 @@ private:
     HWND chk_startup_ = nullptr;
     std::array<HWND, 5> cmb_actions_{};
     std::array<HWND, 5> btn_keys_{};
-    std::wstring stages_scratch_;
     std::wstring status_scratch_;
 };
 

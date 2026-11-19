@@ -62,6 +62,17 @@ enum class AppCmd : uint32_t {
     return out;
 }
 
+inline void append_utf8_as_wide(std::wstring& dst, std::string_view s) {
+    if (s.empty()) return;
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return;
+    const size_t old = dst.size();
+    dst.resize_and_overwrite(old + static_cast<size_t>(n), [&](wchar_t* buf, size_t) noexcept {
+        const int written = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), buf + old, n);
+        return written > 0 ? (old + static_cast<size_t>(written)) : old;
+    });
+}
+
 /// Fixed-capacity stack string with implicit `std::basic_string_view` conversion and zero heap allocations.
 template <typename Char, size_t N>
 struct FixedBasicString {
@@ -322,6 +333,9 @@ inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcep
     LPWSTR msg = nullptr;
     const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
     const DWORD len = FormatMessageW(flags, nullptr, err, 0, reinterpret_cast<LPWSTR>(&msg), 0, nullptr);
+    const auto free_msg = wil::scope_exit([msg] noexcept {
+        if (msg != nullptr) LocalFree(msg);
+    });
     std::wstring_view sv;
     if (len > 0 && msg != nullptr) {
         sv = std::wstring_view{msg, len};
@@ -329,9 +343,7 @@ inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcep
             sv.remove_suffix(1);
         }
     }
-    std::string res = sv.empty() ? ulp::str::concat_strings("WinError ", to_fixed_str(err)) : to_utf8(sv);
-    if (msg != nullptr) LocalFree(msg);
-    return res;
+    return sv.empty() ? ulp::str::concat_strings("WinError ", to_fixed_str(err)) : to_utf8(sv);
 }
 
 [[nodiscard]] inline const fs::path& exe_path() {

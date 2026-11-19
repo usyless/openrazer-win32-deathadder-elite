@@ -11,6 +11,7 @@
 #include <dbt.h>
 #include <shellapi.h>
 #include <wil/resource.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -98,7 +99,8 @@ public:
     int run() {
         SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
         MSG msg{};
-        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        BOOL ret = 0;
+        while ((ret = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
             if (config_.is_open()) {
                 if (config_.handle_message_if_recording(msg)) {
                     continue;
@@ -110,12 +112,15 @@ public:
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        return static_cast<int>(msg.wParam);
+        return ret == -1 ? 1 : static_cast<int>(msg.wParam);
     }
 
     void shutdown() {
         if (shut_down_) return;
         shut_down_ = true;
+        if (hwnd_ != nullptr && IsWindow(hwnd_)) {
+            KillTimer(hwnd_, TIMER_REAPPLY);
+        }
         remapper_.stop();
         if (driver_mode_applied_) {
             (void)mouse_.set_device_mode(protocol::DeviceMode::Normal);
@@ -128,6 +133,9 @@ public:
         remove_tray();
         config_.close();
         mouse_.disconnect();
+        if (!in_destroy_ && hwnd_ != nullptr && IsWindow(hwnd_)) {
+            DestroyWindow(hwnd_);
+        }
     }
 
 private:
@@ -155,8 +163,7 @@ private:
                         open_config();
                         break;
                     case WM_CONTEXTMENU:
-                    case WM_RBUTTONUP:
-                        show_menu();
+                        show_menu(POINT{.x = GET_X_LPARAM(wp), .y = GET_Y_LPARAM(wp)});
                         break;
                     default:
                         break;
@@ -175,7 +182,7 @@ private:
                         apply_all_to_device(true);
                         return TRUE;
                     case AppCmd::Quit:
-                        DestroyWindow(hwnd);
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
                         return TRUE;
                 }
                 return FALSE;
@@ -205,6 +212,12 @@ private:
                 }
                 return TRUE;
 
+            case WM_ENDSESSION:
+                if (wp != FALSE) {
+                    shutdown();
+                }
+                return 0;
+
             case WM_TIMER:
                 if (wp == TIMER_REAPPLY) {
                     KillTimer(hwnd_, TIMER_REAPPLY);
@@ -213,9 +226,19 @@ private:
                 }
                 return 0;
 
+            case WM_CLOSE:
+                DestroyWindow(hwnd);
+                return 0;
+
             case WM_DESTROY:
+                in_destroy_ = true;
                 shutdown();
                 PostQuitMessage(0);
+                return 0;
+
+            case WM_NCDESTROY:
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                hwnd_ = nullptr;
                 return 0;
 
             default:
@@ -227,13 +250,17 @@ private:
     void on_device_change(WPARAM wp, LPARAM lp) {
         if (wp != DBT_DEVICEARRIVAL && wp != DBT_DEVICEREMOVECOMPLETE) return;
         const auto* hdr = reinterpret_cast<const DEV_BROADCAST_HDR*>(lp);
-        if (hdr == nullptr || hdr->dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE) return;
+        if (hdr == nullptr || hdr->dbch_devicetype != DBT_DEVTYP_DEVICEINTERFACE ||
+            hdr->dbch_size <= offsetof(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name)) {
+            return;
+        }
         const auto* dev = reinterpret_cast<const DEV_BROADCAST_DEVICEINTERFACE_W*>(lp);
         const std::wstring_view dev_name{dev->dbcc_name};
         if (!contains_ascii_icase(dev_name, L"vid_1532") || !contains_ascii_icase(dev_name, L"pid_005c")) {
             return;
         }
         if (wp == DBT_DEVICEREMOVECOMPLETE) {
+            remapper_.on_device_removed();
             mouse_.disconnect();
             driver_mode_applied_ = false;
             update_tip();
@@ -243,7 +270,7 @@ private:
         }
     }
 
-    void apply_all_to_device(bool force_reconnect) {
+    void apply_all_to_device(bool force_reconnect, bool refresh_config_status = true) {
         if (force_reconnect) mouse_.disconnect();
 
         const bool connected = mouse_.connect();
@@ -258,21 +285,22 @@ private:
                 driver_mode_applied_ = false;
             }
             if (!poll_ok || !dpi_ok) {
-                last_device_status_.clear();
-                append_to(last_device_status_, L"Device write warning: ", to_wide(mouse_.last_error()));
+                last_device_status_.assign(L"Device write warning: ");
+                append_utf8_as_wide(last_device_status_, mouse_.last_error());
             } else {
                 last_device_status_.clear();
             }
         } else {
             driver_mode_applied_ = false;
-            last_device_status_ = to_wide(mouse_.last_error());
+            last_device_status_.clear();
+            append_utf8_as_wide(last_device_status_, mouse_.last_error());
         }
 
         HidCollectionList cols; // NOLINT(cppcoreguidelines-pro-type-member-init)
         mouse_.copy_collections(cols);
         remapper_.configure(hwnd_, settings_, cols.span(), force_reconnect);
         update_tip();
-        config_.update_status_from_service(settings_);
+        config_.update_status_from_service(settings_, refresh_config_status);
     }
 
     void step_dpi_stage(int delta) {
@@ -317,7 +345,8 @@ private:
     void build_status_text(std::wstring& out) {
         out.clear();
         if (!mouse_.is_connected() && !mouse_.connect()) {
-            append_to(out, L"Disconnected — ", to_wide(mouse_.last_error()));
+            out.assign(L"Disconnected — ");
+            append_utf8_as_wide(out, mouse_.last_error());
             return;
         }
         const auto fw = mouse_.get_firmware_version();
@@ -349,7 +378,7 @@ private:
                     MessageBoxW(config_.hwnd(), msg.c_str(), APP_NAME, MB_ICONWARNING | MB_OK);
                 }
                 (void)save_settings(settings_, json_scratch_);
-                apply_all_to_device(false);
+                apply_all_to_device(false, false);
                 build_status_text(status_out);
                 return true;
             },
@@ -417,7 +446,7 @@ private:
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
-    void show_menu() {
+    void show_menu(POINT pt) {
         const wil::unique_hmenu menu{CreatePopupMenu()};
         FixedWString<128> header;
         if (mouse_.is_connected()) {
@@ -440,7 +469,10 @@ private:
         add_poll(IdPoll1000, 1000, L"1000 Hz (1 ms)");
         add_poll(IdPoll500, 500, L"500 Hz (2 ms)");
         add_poll(IdPoll125, 125, L"125 Hz (8 ms)");
-        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(poll_menu.get()), L"Polling Rate");
+        // Submenus attached via MF_POPUP are owned and destroyed by `menu`.
+        if (AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(poll_menu.get()), L"Polling Rate")) {
+            (void)poll_menu.release();
+        }
 
         wil::unique_hmenu dpi_menu{CreatePopupMenu()};
         for (size_t i = 0; i < settings_.dpi_stages.size(); ++i) {
@@ -450,7 +482,9 @@ private:
             label.append(L" DPI");
             AppendMenuW(dpi_menu.get(), flags, IdStageBase + static_cast<UINT>(i), label.c_str());
         }
-        AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(dpi_menu.get()), L"DPI Preset");
+        if (AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(dpi_menu.get()), L"DPI Preset")) {
+            (void)dpi_menu.release();
+        }
 
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu.get(), MF_STRING, IdConfigure, L"Configure...");
@@ -461,17 +495,14 @@ private:
         AppendMenuW(menu.get(), MF_STRING, IdQuit, L"Quit");
         SetMenuDefaultItem(menu.get(), IdConfigure, FALSE);
 
-        POINT pt{};
-        GetCursorPos(&pt);
+        if (pt.x == 0 && pt.y == 0) {
+            GetCursorPos(&pt);
+        }
         SetForegroundWindow(hwnd_);
         const UINT cmd = static_cast<UINT>(
             TrackPopupMenuEx(menu.get(), TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
                              pt.x, pt.y, hwnd_, nullptr));
         PostMessageW(hwnd_, WM_NULL, 0, 0);
-
-        // Submenus attached via MF_POPUP are owned and destroyed by `menu`.
-        (void)poll_menu.release();
-        (void)dpi_menu.release();
 
         switch (cmd) {
             case IdConfigure: open_config(); break;
@@ -502,7 +533,6 @@ private:
                 }
                 break;
         }
-        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
     }
 
     HINSTANCE inst_ = nullptr;
@@ -510,6 +540,7 @@ private:
     UINT taskbar_created_ = 0;
     HDEVNOTIFY dev_notify_ = nullptr;
     bool shut_down_ = false;
+    bool in_destroy_ = false;
     bool driver_mode_applied_ = false;
     Settings settings_{};
     DeathAdderEliteDevice mouse_;
@@ -586,13 +617,22 @@ int run_cli_one_shot(const std::vector<std::wstring_view>& args) {
             }
             req_poll = static_cast<uint16_t>(v);
         } else if (a == L"--dpi" && i + 1 < args.size()) {
-            const long x = parse_long(args[++i]).value_or(0);
-            long y = x;
+            const std::optional<long> x = parse_long(args[++i]);
+            if (!x.has_value() || *x <= 0) {
+                std::println(stderr, "Invalid DPI value. Expected integer in 100..16000.");
+                return 2;
+            }
+            long y = *x;
             if (i + 1 < args.size() && !args[i + 1].starts_with(L'-')) {
-                y = parse_long(args[++i]).value_or(0);
+                const std::optional<long> py = parse_long(args[++i]);
+                if (!py.has_value() || *py <= 0) {
+                    std::println(stderr, "Invalid DPI Y value. Expected integer in 100..16000.");
+                    return 2;
+                }
+                y = *py;
             }
             req_dpi = std::pair{
-                protocol::clamp_dpi(static_cast<uint16_t>(std::clamp<long>(x, 100, 16000))),
+                protocol::clamp_dpi(static_cast<uint16_t>(std::clamp<long>(*x, 100, 16000))),
                 protocol::clamp_dpi(static_cast<uint16_t>(std::clamp<long>(y, 100, 16000))),
             };
         } else {

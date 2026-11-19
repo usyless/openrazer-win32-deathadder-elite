@@ -307,6 +307,7 @@ private:
         });
 
         bool any_control = false;
+        DWORD last_open_err = ERROR_ACCESS_DENIED;
         for (const auto& candidate : collections_.span()) {
             if (candidate.feature_len != protocol::FEATURE_BUFFER_SIZE) continue;
             any_control = true;
@@ -317,6 +318,7 @@ private:
                 last_error_.clear();
                 return true;
             }
+            last_open_err = GetLastError();
         }
 
         handle_.reset();
@@ -325,7 +327,7 @@ private:
             last_error_ = "Razer DeathAdder Elite (1532:005C) not found.";
         } else {
             last_error_.clear();
-            append_to(last_error_, "Could not open HID control handle: ", win32_error_utf8(GetLastError()));
+            append_to(last_error_, "Could not open HID control handle: ", win32_error_utf8(last_open_err));
         }
         return false;
     }
@@ -371,15 +373,18 @@ private:
             }
 
             if (got_reply && protocol::response_matches(request, response) &&
-                (response.status == static_cast<uint8_t>(protocol::Status::Successful) ||
-                 response.status == static_cast<uint8_t>(protocol::Status::Busy))) {
+                response.status == static_cast<uint8_t>(protocol::Status::Successful)) {
                 last_error_.clear();
                 return true;
             }
 
-            if (got_reply && response.status == static_cast<uint8_t>(protocol::Status::NotSupported)) {
-                last_error_ = "Command not supported by device firmware.";
-                return false;
+            if (got_reply) {
+                if (response.status == static_cast<uint8_t>(protocol::Status::NotSupported)) {
+                    last_error_ = "Command not supported by device firmware.";
+                    return false;
+                }
+                // Clear any earlier transport error so a final protocol status failure isn't masked.
+                last_error_.clear();
             }
 
             Sleep(10);

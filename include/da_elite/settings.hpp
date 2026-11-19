@@ -195,9 +195,7 @@ struct RuntimeBinding {
     }
 
     UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    if (vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN ||
-        vk == VK_PRIOR || vk == VK_NEXT || vk == VK_END || vk == VK_HOME ||
-        vk == VK_INSERT || vk == VK_DELETE || vk == VK_DIVIDE) {
+    if (vk == VK_DIVIDE || vk == VK_RCONTROL || vk == VK_RMENU || vk == VK_NUMLOCK) {
         scan |= KF_EXTENDED;
     }
     std::array<wchar_t, 64> buf{};
@@ -238,35 +236,33 @@ inline void sanitize_settings(Settings& s) {
 inline constexpr const wchar_t* RUN_REG_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 [[nodiscard]] inline bool is_startup_enabled() noexcept {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    wil::unique_hkey key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY, 0, KEY_QUERY_VALUE, key.put()) != ERROR_SUCCESS) {
         return false;
     }
     DWORD type = 0;
     DWORD size = 0;
-    const LSTATUS st = RegQueryValueExW(key, L"da-elite", nullptr, &type, nullptr, &size);
-    RegCloseKey(key);
+    const LSTATUS st = RegQueryValueExW(key.get(), L"da-elite", nullptr, &type, nullptr, &size);
     return st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && size > sizeof(wchar_t);
 }
 
 inline bool set_startup_enabled(bool enable) {
-    HKEY key = nullptr;
+    wil::unique_hkey key;
     LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY,
-                                 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+                                 0, nullptr, 0, KEY_SET_VALUE, nullptr, key.put(), nullptr);
     if (st != ERROR_SUCCESS) {
         SetLastError(static_cast<DWORD>(st));
         return false;
     }
     if (enable) {
         const std::wstring cmd = ulp::str::concat_strings(L"\"", exe_path().native(), L"\" --tray");
-        st = RegSetValueExW(key, L"da-elite", 0, REG_SZ,
+        st = RegSetValueExW(key.get(), L"da-elite", 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(cmd.c_str()),
                             static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
     } else {
-        st = RegDeleteValueW(key, L"da-elite");
+        st = RegDeleteValueW(key.get(), L"da-elite");
         if (st == ERROR_FILE_NOT_FOUND) st = ERROR_SUCCESS;
     }
-    RegCloseKey(key);
     if (st != ERROR_SUCCESS) {
         SetLastError(static_cast<DWORD>(st));
         return false;
@@ -321,7 +317,12 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
         tmp_ptr = tmp_heap.c_str();
     }
 
-    if (!write_file_bytes(tmp_ptr, json_scratch)) return false;
+    if (!write_file_bytes(tmp_ptr, json_scratch)) {
+        const DWORD err = GetLastError();
+        DeleteFileW(tmp_ptr);
+        SetLastError(err);
+        return false;
+    }
     if (MoveFileExW(tmp_ptr, path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
         return true;
     }

@@ -145,11 +145,8 @@ public:
     void configure(HWND target_hwnd, const Settings& settings,
                    std::span<const HidCollectionInfo> collections, bool force_restart_dpi = false) {
         target_hwnd_.store(target_hwnd, std::memory_order_relaxed);
-        {
-            const std::scoped_lock lock{mu_};
-            for (size_t i = 0; i < mappings_.size(); ++i) {
-                mappings_[i] = to_runtime_binding(get_binding(settings.buttons, static_cast<ButtonId>(i)));
-            }
+        for (size_t i = 0; i < mappings_.size(); ++i) {
+            mappings_[i] = to_runtime_binding(get_binding(settings.buttons, static_cast<ButtonId>(i)));
         }
 
         remapped_mouse_[0].store(is_binding_remapped(settings.buttons.middle), std::memory_order_relaxed);
@@ -170,28 +167,30 @@ public:
         }
     }
 
+    void on_device_removed() noexcept {
+        stop_dpi_listener();
+    }
+
     void stop() noexcept {
         remove_hook();
         stop_dpi_listener();
     }
 
     [[nodiscard]] bool hook_active() const noexcept {
-        return hook_ != nullptr;
+        return hook_active_.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] bool dpi_listener_active() const noexcept {
-        return dpi_listener_open_.load(std::memory_order_relaxed);
+        return direct_reader_active_.load(std::memory_order_acquire) ||
+               raw_fallback_active_.load(std::memory_order_acquire);
     }
 
     /// Executes a remapped button event on the service message thread.
     /// Returns +1 for DpiCycleUp, -1 for DpiCycleDown, or 0 otherwise.
-    [[nodiscard]] int dispatch_event(ButtonId btn, bool is_down) noexcept {
-        RuntimeBinding binding{};
+    [[nodiscard]] int dispatch_event(ButtonId btn, bool is_down) const noexcept {
         const auto idx = static_cast<size_t>(btn);
-        if (idx < mappings_.size()) {
-            const std::scoped_lock lock{mu_};
-            binding = mappings_[idx];
-        }
+        if (idx >= mappings_.size()) return 0;
+        const RuntimeBinding& binding = mappings_[idx];
         if (binding.kind == ActionKind::DpiCycleUp) {
             return is_down ? 1 : 0;
         }
@@ -247,10 +246,15 @@ public:
     }
 
 private:
-    static inline ButtonRemapper* active_instance_ = nullptr;
+    struct HookThreadStart {
+        ButtonRemapper* self;
+        HANDLE ready_event;
+    };
+
+    static inline std::atomic<ButtonRemapper*> active_instance_{nullptr};
 
     static LRESULT CALLBACK low_level_mouse_proc(int n_code, WPARAM w_param, LPARAM l_param) {
-        ButtonRemapper* self = active_instance_;
+        ButtonRemapper* const self = active_instance_.load(std::memory_order_acquire);
         if (n_code == HC_ACTION && self != nullptr) {
             const auto* ms = reinterpret_cast<const MSLLHOOKSTRUCT*>(l_param);
             if ((ms->flags & LLMHF_INJECTED) == 0) {
@@ -293,20 +297,75 @@ private:
         return CallNextHookEx(nullptr, n_code, w_param, l_param);
     }
 
+    static DWORD WINAPI hook_thread_proc(LPVOID param) noexcept {
+        const auto* start = static_cast<const HookThreadStart*>(param);
+        ButtonRemapper* const self = start->self;
+        const HANDLE ready = start->ready_event;
+
+        // Create message queue before signaling ready so PostThreadMessageW(WM_QUIT) cannot race.
+        MSG msg{};
+        PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+
+        active_instance_.store(self, std::memory_order_release);
+        HHOOK hook = SetWindowsHookExW(WH_MOUSE_LL, &ButtonRemapper::low_level_mouse_proc,
+                                       GetModuleHandleW(nullptr), 0);
+        if (hook == nullptr) {
+            ButtonRemapper* expected = self;
+            active_instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+            self->hook_active_.store(false, std::memory_order_release);
+            SetEvent(ready);
+            return 0;
+        }
+
+        self->hook_active_.store(true, std::memory_order_release);
+        SetEvent(ready);
+
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            DispatchMessageW(&msg);
+        }
+
+        UnhookWindowsHookEx(hook);
+        ButtonRemapper* expected = self;
+        active_instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
+        self->hook_active_.store(false, std::memory_order_release);
+        return 0;
+    }
+
     void install_hook() noexcept {
-        if (hook_ != nullptr) return;
-        active_instance_ = this;
-        hook_ = SetWindowsHookExW(WH_MOUSE_LL, &ButtonRemapper::low_level_mouse_proc,
-                                  GetModuleHandleW(nullptr), 0);
+        if (hook_thread_) {
+            if (WaitForSingleObject(hook_thread_.get(), 0) != WAIT_OBJECT_0) {
+                return;
+            }
+            hook_thread_.reset();
+            hook_thread_id_ = 0;
+        }
+        const wil::unique_event_nothrow ready{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+        if (!ready) return;
+
+        HookThreadStart start{.self = this, .ready_event = ready.get()};
+        DWORD tid = 0;
+        wil::unique_handle thread{CreateThread(
+            nullptr, SIZE_T{256} * 1024, &ButtonRemapper::hook_thread_proc, &start,
+            STACK_SIZE_PARAM_IS_A_RESERVATION, &tid)};
+        if (!thread) return;
+
+        WaitForSingleObject(ready.get(), INFINITE);
+        if (!hook_active_.load(std::memory_order_acquire)) {
+            WaitForSingleObject(thread.get(), INFINITE);
+            return;
+        }
+        hook_thread_ = std::move(thread);
+        hook_thread_id_ = tid;
     }
 
     void remove_hook() noexcept {
-        if (hook_ != nullptr) {
-            UnhookWindowsHookEx(hook_);
-            hook_ = nullptr;
-        }
-        if (active_instance_ == this) {
-            active_instance_ = nullptr;
+        if (hook_thread_) {
+            if (hook_thread_id_ != 0) {
+                PostThreadMessageW(hook_thread_id_, WM_QUIT, 0, 0);
+            }
+            WaitForSingleObject(hook_thread_.get(), INFINITE);
+            hook_thread_.reset();
+            hook_thread_id_ = 0;
         }
     }
 
@@ -348,6 +407,7 @@ private:
                 return;
             }
             dpi_thread_.reset();
+            dpi_stop_event_.reset();
         }
         {
             const std::scoped_lock lock{rep4_mu_};
@@ -360,14 +420,18 @@ private:
             if (dpi_collections_.count >= MAX_HID_COLLECTIONS) break;
             dpi_collections_.items[dpi_collections_.count++] = c;
         }
+        if (dpi_collections_.empty()) return;
 
         dpi_stop_requested_.store(false, std::memory_order_relaxed);
         dpi_stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+        if (!dpi_stop_event_) return;
         dpi_thread_.reset(CreateThread(nullptr, 0, &ButtonRemapper::dpi_thread_proc, this, 0, nullptr));
+        if (!dpi_thread_) {
+            dpi_stop_event_.reset();
+        }
     }
 
     void stop_dpi_listener() noexcept {
-        unregister_raw_hid_fallback();
         dpi_stop_requested_.store(true, std::memory_order_release);
         if (dpi_stop_event_) SetEvent(dpi_stop_event_.get());
         if (dpi_thread_) {
@@ -375,8 +439,8 @@ private:
             dpi_thread_.reset();
         }
         dpi_stop_event_.reset();
-        direct_reader_active_.store(false, std::memory_order_relaxed);
-        dpi_listener_open_.store(false, std::memory_order_relaxed);
+        direct_reader_active_.store(false, std::memory_order_release);
+        unregister_raw_hid_fallback();
     }
 
     void register_raw_hid_fallback(std::span<const HidCollectionInfo> cols) noexcept {
@@ -384,6 +448,7 @@ private:
         if (target == nullptr || raw_pages_count_ > 0) return;
 
         std::array<RAWINPUTDEVICE, MAX_HID_COLLECTIONS> rids; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        std::array<uint32_t, MAX_HID_COLLECTIONS> pages;      // NOLINT(cppcoreguidelines-pro-type-member-init)
         size_t rid_count = 0;
         for (const auto& c : cols) {
             if (c.input_len < 16) continue;
@@ -391,14 +456,14 @@ private:
             if (c.usage_page == 0x01 && (c.usage == 0x02 || c.usage == 0x06)) continue;
             const uint32_t key = (static_cast<uint32_t>(c.usage_page) << 16u) | c.usage;
             bool seen = false;
-            for (size_t i = 0; i < raw_pages_count_; ++i) {
-                if (raw_pages_[i] == key) {
+            for (size_t i = 0; i < rid_count; ++i) {
+                if (pages[i] == key) {
                     seen = true;
                     break;
                 }
             }
-            if (seen || raw_pages_count_ >= raw_pages_.size()) continue;
-            raw_pages_[raw_pages_count_++] = key;
+            if (seen || rid_count >= pages.size()) continue;
+            pages[rid_count] = key;
 
             RAWINPUTDEVICE rid{};
             rid.usUsagePage = c.usage_page;
@@ -407,8 +472,11 @@ private:
             rid.hwndTarget = target;
             rids[rid_count++] = rid;
         }
-        if (rid_count > 0) {
-            RegisterRawInputDevices(rids.data(), static_cast<UINT>(rid_count), sizeof(RAWINPUTDEVICE));
+        if (rid_count > 0 &&
+            RegisterRawInputDevices(rids.data(), static_cast<UINT>(rid_count), sizeof(RAWINPUTDEVICE)) != FALSE) {
+            for (size_t i = 0; i < rid_count; ++i) raw_pages_[i] = pages[i];
+            raw_pages_count_ = rid_count;
+            raw_fallback_active_.store(true, std::memory_order_release);
         }
     }
 
@@ -424,6 +492,7 @@ private:
             RegisterRawInputDevices(&rid, 1, sizeof(RAWINPUTDEVICE));
         }
         raw_pages_count_ = 0;
+        raw_fallback_active_.store(false, std::memory_order_release);
     }
 
     void dpi_reader_loop() noexcept {
@@ -435,6 +504,7 @@ private:
             std::array<uint8_t, MAX_DPI_INPUT_BUF> buf;
             DWORD buf_len = 0;
             bool pending = false;
+            bool failed = false;
         };
 
         std::array<Reader, MAX_HID_COLLECTIONS> readers; // NOLINT(cppcoreguidelines-pro-type-member-init)
@@ -456,25 +526,45 @@ private:
             r.buf_len = c.input_len;
         }
 
-        direct_reader_active_.store(reader_count > 0, std::memory_order_relaxed);
-        dpi_listener_open_.store(reader_count > 0 || raw_pages_count_ > 0, std::memory_order_relaxed);
-        if (reader_count == 0) return;
+        if (reader_count == 0) {
+            direct_reader_active_.store(false, std::memory_order_release);
+            return;
+        }
+
+        direct_reader_active_.store(true, std::memory_order_release);
+        const auto clear_active = wil::scope_exit([this] noexcept {
+            direct_reader_active_.store(false, std::memory_order_release);
+        });
+
+        // Must run before `readers` destructs so the kernel cannot write into freed OVERLAPPED/buf memory.
+        const auto cancel_pending = wil::scope_exit([&] noexcept {
+            for (size_t i = 0; i < reader_count; ++i) {
+                Reader& r = readers[i];
+                if (!r.pending) continue;
+                CancelIoEx(r.file.get(), &r.ov);
+                DWORD ignored = 0;
+                GetOverlappedResult(r.file.get(), &r.ov, &ignored, TRUE);
+                r.pending = false;
+            }
+        });
 
         while (!dpi_stop_requested_.load(std::memory_order_acquire)) {
             std::array<HANDLE, MAX_HID_COLLECTIONS + 1> handles; // NOLINT(cppcoreguidelines-pro-type-member-init)
             size_t handle_count = 0;
-            if (dpi_stop_event_) handles[handle_count++] = dpi_stop_event_.get();
+            handles[handle_count++] = dpi_stop_event_.get();
 
             for (size_t i = 0; i < reader_count; ++i) {
                 Reader& r = readers[i];
-                if (!r.pending) {
+                if (r.failed) continue;
+                while (!r.pending && !dpi_stop_requested_.load(std::memory_order_acquire)) {
                     ResetEvent(r.ev.get());
                     r.ov = OVERLAPPED{};
                     r.ov.hEvent = r.ev.get();
-                    DWORD got = 0;
-                    const BOOL ok = ReadFile(r.file.get(), r.buf.data(), r.buf_len, &got, &r.ov);
+                    const BOOL ok = ReadFile(r.file.get(), r.buf.data(), r.buf_len, nullptr, &r.ov);
                     if (ok) {
-                        if (got >= 16 && r.buf[0] == 0x04) {
+                        DWORD got = 0;
+                        if (GetOverlappedResult(r.file.get(), &r.ov, &got, FALSE) &&
+                            got >= 16 && r.buf[0] == 0x04) {
                             process_rep4(std::span<const uint8_t, 16>{r.buf.data(), 16});
                         }
                         continue;
@@ -482,15 +572,19 @@ private:
                     if (GetLastError() == ERROR_IO_PENDING) {
                         r.pending = true;
                     } else {
-                        continue;
+                        r.failed = true;
+                        r.file.reset();
+                        break;
                     }
                 }
-                handles[handle_count++] = r.ev.get();
+                if (r.pending) {
+                    handles[handle_count++] = r.ev.get();
+                }
             }
 
-            if (handle_count == 0) break;
+            if (handle_count <= 1 || dpi_stop_requested_.load(std::memory_order_acquire)) break;
             const DWORD wait = WaitForMultipleObjects(static_cast<DWORD>(handle_count), handles.data(), FALSE, INFINITE);
-            if (wait == WAIT_FAILED || (dpi_stop_event_ && wait == WAIT_OBJECT_0)) break;
+            if (wait == WAIT_FAILED || wait == WAIT_OBJECT_0) break;
 
             for (size_t i = 0; i < reader_count; ++i) {
                 Reader& r = readers[i];
@@ -503,30 +597,29 @@ private:
                     }
                 } else if (GetLastError() != ERROR_IO_INCOMPLETE) {
                     r.pending = false;
+                    r.failed = true;
+                    r.file.reset();
                 }
             }
         }
-
-        for (size_t i = 0; i < reader_count; ++i) {
-            if (readers[i].pending) CancelIoEx(readers[i].file.get(), &readers[i].ov);
-        }
     }
 
-    std::mutex mu_;
     std::mutex rep4_mu_;
     std::atomic<HWND> target_hwnd_{nullptr};
     std::array<RuntimeBinding, static_cast<size_t>(ButtonId::Count)> mappings_{};
     std::array<std::atomic<bool>, 3> remapped_mouse_{};
     std::array<uint8_t, 16> prev_rep4_{};
-    HHOOK hook_ = nullptr;
+    wil::unique_handle hook_thread_;
+    DWORD hook_thread_id_ = 0;
+    std::atomic<bool> hook_active_{false};
     std::array<uint32_t, MAX_HID_COLLECTIONS> raw_pages_{};
     size_t raw_pages_count_ = 0;
+    std::atomic<bool> raw_fallback_active_{false};
     HidCollectionList dpi_collections_; // NOLINT(cppcoreguidelines-pro-type-member-init)
     wil::unique_handle dpi_thread_;
     wil::unique_event_nothrow dpi_stop_event_;
     std::atomic<bool> dpi_stop_requested_{false};
     std::atomic<bool> direct_reader_active_{false};
-    std::atomic<bool> dpi_listener_open_{false};
 };
 
 } // namespace da_elite
