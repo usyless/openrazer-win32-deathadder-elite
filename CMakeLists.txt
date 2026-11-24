@@ -5,7 +5,7 @@ set(CMAKE_FIND_USE_PACKAGE_REGISTRY OFF CACHE BOOL "" FORCE)
 
 project(
     da_elite
-    VERSION 0.1.3
+    VERSION 0.1.4
     LANGUAGES C CXX RC
 )
 
@@ -161,6 +161,8 @@ if(BUILD_TESTING)
     set_target_properties(da-elite-tests PROPERTIES CXX_SCAN_FOR_MODULES OFF)
     target_link_libraries(da-elite-tests PRIVATE
         da_elite_common
+        hid
+        setupapi
         shell32
         user32
         advapi32

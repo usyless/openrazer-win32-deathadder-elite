@@ -151,11 +151,12 @@ private:
 
     LRESULT handle(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == taskbar_created_ && taskbar_created_ != 0) {
-            add_tray();
+            if (!shut_down_) add_tray();
             return 0;
         }
         switch (msg) {
             case WM_TRAY:
+                if (shut_down_) return 0;
                 switch (LOWORD(lp)) {
                     case NIN_SELECT:
                     case NIN_KEYSELECT:
@@ -171,6 +172,7 @@ private:
                 return 0;
 
             case WM_COPYDATA: {
+                if (shut_down_) return FALSE;
                 const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lp);
                 if (cds == nullptr) return FALSE;
                 switch (static_cast<AppCmd>(cds->dwData)) {
@@ -189,6 +191,7 @@ private:
             }
 
             case ButtonRemapper::WM_REMAP_EVENT: {
+                if (shut_down_) return 0;
                 const auto btn = static_cast<ButtonId>(wp);
                 const bool is_down = (lp != 0);
                 const int dpi_delta = remapper_.dispatch_event(btn, is_down);
@@ -199,15 +202,17 @@ private:
             }
 
             case WM_INPUT:
-                remapper_.handle_raw_input(reinterpret_cast<HRAWINPUT>(lp));
-                return 0;
+                if (!shut_down_) {
+                    remapper_.handle_raw_input(reinterpret_cast<HRAWINPUT>(lp));
+                }
+                return DefWindowProcW(hwnd, msg, wp, lp);
 
             case WM_DEVICECHANGE:
-                on_device_change(wp, lp);
+                if (!shut_down_) on_device_change(wp, lp);
                 return TRUE;
 
             case WM_POWERBROADCAST:
-                if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
+                if (!shut_down_ && (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND)) {
                     SetTimer(hwnd_, TIMER_REAPPLY, 600, nullptr);
                 }
                 return TRUE;
@@ -219,7 +224,7 @@ private:
                 return 0;
 
             case WM_TIMER:
-                if (wp == TIMER_REAPPLY) {
+                if (!shut_down_ && wp == TIMER_REAPPLY) {
                     KillTimer(hwnd_, TIMER_REAPPLY);
                     mouse_.disconnect();
                     apply_all_to_device(true);
@@ -255,11 +260,18 @@ private:
             return;
         }
         const auto* dev = reinterpret_cast<const DEV_BROADCAST_DEVICEINTERFACE_W*>(lp);
-        const std::wstring_view dev_name{dev->dbcc_name};
+        const size_t max_chars =
+            (hdr->dbch_size - offsetof(DEV_BROADCAST_DEVICEINTERFACE_W, dbcc_name)) / sizeof(wchar_t);
+        size_t name_len = 0;
+        while (name_len < max_chars && dev->dbcc_name[name_len] != L'\0') {
+            ++name_len;
+        }
+        const std::wstring_view dev_name{dev->dbcc_name, name_len};
         if (!contains_ascii_icase(dev_name, L"vid_1532") || !contains_ascii_icase(dev_name, L"pid_005c")) {
             return;
         }
         if (wp == DBT_DEVICEREMOVECOMPLETE) {
+            KillTimer(hwnd_, TIMER_REAPPLY);
             remapper_.on_device_removed();
             mouse_.disconnect();
             driver_mode_applied_ = false;
@@ -275,18 +287,26 @@ private:
 
         const bool connected = mouse_.connect();
         if (connected) {
+            std::string first_err;
             const bool poll_ok = mouse_.set_polling_rate(settings_.polling_rate);
+            if (!poll_ok) first_err = mouse_.last_error();
+
             const bool dpi_ok = mouse_.set_dpi(settings_.dpi_x, settings_.dpi_y);
+            if (!dpi_ok && first_err.empty()) first_err = mouse_.last_error();
+
+            bool driver_ok = true;
             const bool want_driver = any_driver_mode_needed(settings_);
             if (want_driver) {
                 driver_mode_applied_ = mouse_.set_device_mode(protocol::DeviceMode::Driver);
+                driver_ok = driver_mode_applied_;
+                if (!driver_ok && first_err.empty()) first_err = mouse_.last_error();
             } else if (driver_mode_applied_) {
                 (void)mouse_.set_device_mode(protocol::DeviceMode::Normal);
                 driver_mode_applied_ = false;
             }
-            if (!poll_ok || !dpi_ok) {
+            if (!poll_ok || !dpi_ok || !driver_ok) {
                 last_device_status_.assign(L"Device write warning: ");
-                append_utf8_as_wide(last_device_status_, mouse_.last_error());
+                append_utf8_as_wide(last_device_status_, first_err);
             } else {
                 last_device_status_.clear();
             }
@@ -296,7 +316,7 @@ private:
             append_utf8_as_wide(last_device_status_, mouse_.last_error());
         }
 
-        HidCollectionList cols; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        HidCollectionList cols{};
         mouse_.copy_collections(cols);
         remapper_.configure(hwnd_, settings_, cols.span(), force_reconnect);
         update_tip();
@@ -414,7 +434,7 @@ private:
             inst_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
             GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR)));
         nid.hIcon = tray_icon_.get();
-        wcscpy_s(nid.szTip, APP_NAME);
+        wcsncpy_s(nid.szTip, APP_NAME, _TRUNCATE);
         Shell_NotifyIconW(NIM_ADD, &nid);
         nid.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &nid);
@@ -442,12 +462,13 @@ private:
 
         NOTIFYICONDATAW nid = tray_data();
         nid.uFlags = NIF_TIP | NIF_SHOWTIP;
-        wcscpy_s(nid.szTip, tip.c_str());
+        wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
     void show_menu(POINT pt) {
         const wil::unique_hmenu menu{CreatePopupMenu()};
+        if (!menu) return;
         FixedWString<128> header;
         if (mouse_.is_connected()) {
             header.assign(L"DeathAdder Elite • ");
@@ -462,28 +483,32 @@ private:
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
 
         wil::unique_hmenu poll_menu{CreatePopupMenu()};
-        const auto add_poll = [&](UINT id, uint16_t hz, const wchar_t* label) {
-            const UINT flags = MF_STRING | (settings_.polling_rate == hz ? MF_CHECKED : 0);
-            AppendMenuW(poll_menu.get(), flags, id, label);
-        };
-        add_poll(IdPoll1000, 1000, L"1000 Hz (1 ms)");
-        add_poll(IdPoll500, 500, L"500 Hz (2 ms)");
-        add_poll(IdPoll125, 125, L"125 Hz (8 ms)");
-        // Submenus attached via MF_POPUP are owned and destroyed by `menu`.
-        if (AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(poll_menu.get()), L"Polling Rate")) {
-            (void)poll_menu.release();
+        if (poll_menu) {
+            const auto add_poll = [&](UINT id, uint16_t hz, const wchar_t* label) {
+                const UINT flags = MF_STRING | (settings_.polling_rate == hz ? MF_CHECKED : 0);
+                AppendMenuW(poll_menu.get(), flags, id, label);
+            };
+            add_poll(IdPoll1000, 1000, L"1000 Hz (1 ms)");
+            add_poll(IdPoll500, 500, L"500 Hz (2 ms)");
+            add_poll(IdPoll125, 125, L"125 Hz (8 ms)");
+            // Submenus attached via MF_POPUP are owned and destroyed by `menu`.
+            if (AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(poll_menu.get()), L"Polling Rate")) {
+                (void)poll_menu.release();
+            }
         }
 
         wil::unique_hmenu dpi_menu{CreatePopupMenu()};
-        for (size_t i = 0; i < settings_.dpi_stages.size(); ++i) {
-            const uint16_t stage = settings_.dpi_stages[i];
-            const UINT flags = MF_STRING | (settings_.dpi_x == stage ? MF_CHECKED : 0);
-            FixedWString<32> label = to_fixed_wstr<32>(stage);
-            label.append(L" DPI");
-            AppendMenuW(dpi_menu.get(), flags, IdStageBase + static_cast<UINT>(i), label.c_str());
-        }
-        if (AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(dpi_menu.get()), L"DPI Preset")) {
-            (void)dpi_menu.release();
+        if (dpi_menu) {
+            for (size_t i = 0; i < settings_.dpi_stages.size(); ++i) {
+                const uint16_t stage = settings_.dpi_stages[i];
+                const UINT flags = MF_STRING | (settings_.dpi_x == stage ? MF_CHECKED : 0);
+                FixedWString<32> label = to_fixed_wstr<32>(stage);
+                label.append(L" DPI");
+                AppendMenuW(dpi_menu.get(), flags, IdStageBase + static_cast<UINT>(i), label.c_str());
+            }
+            if (AppendMenuW(menu.get(), MF_POPUP, reinterpret_cast<UINT_PTR>(dpi_menu.get()), L"DPI Preset")) {
+                (void)dpi_menu.release();
+            }
         }
 
         AppendMenuW(menu.get(), MF_SEPARATOR, 0, nullptr);
@@ -502,6 +527,7 @@ private:
         const UINT cmd = static_cast<UINT>(
             TrackPopupMenuEx(menu.get(), TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
                              pt.x, pt.y, hwnd_, nullptr));
+        if (shut_down_ || hwnd_ == nullptr) return;
         PostMessageW(hwnd_, WM_NULL, 0, 0);
 
         switch (cmd) {
@@ -759,12 +785,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         return run_cli_one_shot(args);
     }
 
-    const wil::unique_mutex_nothrow single{CreateMutexW(nullptr, TRUE, INSTANCE_MUTEX)};
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    const wil::unique_mutex_nothrow single{CreateMutexW(nullptr, FALSE, INSTANCE_MUTEX)};
+    const DWORD mutex_err = GetLastError();
+    if (!single || mutex_err == ERROR_ALREADY_EXISTS) {
         if (HWND existing = find_service_window(); existing != nullptr && (!tray_only || show_flag)) {
             send_app_cmd(existing, AppCmd::ShowConfig);
         }
-        return 0;
+        return (!single && mutex_err != ERROR_ACCESS_DENIED) ? 1 : 0;
     }
 
     usylibpp::windows::darkmode::init_dark_mode();

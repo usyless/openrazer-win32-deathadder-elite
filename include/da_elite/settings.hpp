@@ -115,10 +115,14 @@ struct Settings {
     return m.middle;
 }
 
+inline constexpr size_t MAX_DPI_STAGES = 16;
+
 struct RuntimeBinding {
     ActionKind kind = ActionKind::Default;
     uint32_t vk = 0;
     uint32_t mods = 0;
+
+    friend constexpr bool operator==(const RuntimeBinding&, const RuntimeBinding&) noexcept = default;
 };
 
 [[nodiscard]] inline RuntimeBinding to_runtime_binding(const ButtonBinding& b) noexcept {
@@ -195,7 +199,8 @@ struct RuntimeBinding {
     }
 
     UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    if (vk == VK_DIVIDE || vk == VK_RCONTROL || vk == VK_RMENU || vk == VK_NUMLOCK) {
+    if (vk == VK_DIVIDE || vk == VK_RCONTROL || vk == VK_RMENU || vk == VK_NUMLOCK ||
+        vk == VK_APPS || vk == VK_SNAPSHOT) {
         scan |= KF_EXTENDED;
     }
     std::array<wchar_t, 64> buf{};
@@ -223,13 +228,19 @@ inline void sanitize_settings(Settings& s) {
     std::ranges::sort(s.dpi_stages);
     const auto dup = std::ranges::unique(s.dpi_stages);
     s.dpi_stages.erase(dup.begin(), dup.end());
+    if (s.dpi_stages.size() > MAX_DPI_STAGES) {
+        s.dpi_stages.resize(MAX_DPI_STAGES);
+    }
     if (s.dpi_stages.empty()) {
         s.dpi_stages = {400, 800, 1600, 3200};
     }
 
+    constexpr uint32_t VALID_MODS = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN;
     for (size_t i = 0; i < static_cast<size_t>(ButtonId::Count); ++i) {
         auto& b = get_binding(s.buttons, static_cast<ButtonId>(i));
         b.kind = action_kind_name(parse_action_kind(b.kind));
+        b.mods &= VALID_MODS;
+        if (b.vk > 0xFEu) b.vk = 0;
     }
 }
 
@@ -273,27 +284,6 @@ inline bool set_startup_enabled(bool enable) {
 inline constexpr auto JSON_READ = glz::opts{.error_on_unknown_keys = false};
 inline constexpr auto JSON_WRITE = glz::opts{.prettify = true};
 
-[[nodiscard]] inline Settings load_settings(bool* parse_ok = nullptr) {
-    Settings s{};
-    if (parse_ok != nullptr) *parse_ok = true;
-    const fs::path& path = settings_path();
-    std::error_code ec;
-    const bool existed = fs::exists(path, ec);
-    if (auto bytes = usylibpp::files::read_as_bytes(path)) {
-        const auto err = glz::read<JSON_READ>(s, *bytes);
-        if (err && parse_ok != nullptr) *parse_ok = false;
-    }
-    sanitize_settings(s);
-    s.launch_on_startup = is_startup_enabled();
-    if (!existed) {
-        std::string scratch;
-        if (!glz::write<JSON_WRITE>(s, scratch)) {
-            (void)write_file_bytes(path.c_str(), scratch);
-        }
-    }
-    return s;
-}
-
 inline bool save_settings(const Settings& s, std::string& json_scratch) {
     const fs::path& path = settings_path();
     json_scratch.clear();
@@ -335,6 +325,27 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
 inline bool save_settings(const Settings& s) {
     std::string scratch;
     return save_settings(s, scratch);
+}
+
+[[nodiscard]] inline Settings load_settings(bool* parse_ok = nullptr) {
+    Settings s{};
+    if (parse_ok != nullptr) *parse_ok = true;
+    const fs::path& path = settings_path();
+    std::error_code ec;
+    const bool existed = fs::exists(path, ec);
+    if (auto bytes = usylibpp::files::read_as_bytes(path)) {
+        const auto err = glz::read<JSON_READ>(s, *bytes);
+        if (err) {
+            s = Settings{};
+            if (parse_ok != nullptr) *parse_ok = false;
+        }
+    }
+    sanitize_settings(s);
+    s.launch_on_startup = is_startup_enabled();
+    if (!existed) {
+        (void)save_settings(s);
+    }
+    return s;
 }
 
 } // namespace da_elite

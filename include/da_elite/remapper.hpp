@@ -104,20 +104,28 @@ inline void send_binding_event(const RuntimeBinding& binding, bool is_down) noex
             append_mouse_input(inputs, count, is_down ? MOUSEEVENTF_XDOWN : MOUSEEVENTF_XUP, XBUTTON2);
             break;
         case ActionKind::KeyCombo: {
-            if (binding.vk == 0) return;
+            if (binding.vk == 0 || binding.vk > 0xFEu) return;
             const auto vk = static_cast<uint16_t>(binding.vk);
+            const bool send_ctrl = (binding.mods & MOD_CONTROL) != 0 &&
+                                   vk != VK_CONTROL && vk != VK_LCONTROL && vk != VK_RCONTROL;
+            const bool send_alt = (binding.mods & MOD_ALT) != 0 &&
+                                  vk != VK_MENU && vk != VK_LMENU && vk != VK_RMENU;
+            const bool send_shift = (binding.mods & MOD_SHIFT) != 0 &&
+                                    vk != VK_SHIFT && vk != VK_LSHIFT && vk != VK_RSHIFT;
+            const bool send_win = (binding.mods & MOD_WIN) != 0 &&
+                                  vk != VK_LWIN && vk != VK_RWIN;
             if (is_down) {
-                if ((binding.mods & MOD_CONTROL) != 0) append_key_input(inputs, count, VK_CONTROL, true);
-                if ((binding.mods & MOD_ALT) != 0) append_key_input(inputs, count, VK_MENU, true);
-                if ((binding.mods & MOD_SHIFT) != 0) append_key_input(inputs, count, VK_SHIFT, true);
-                if ((binding.mods & MOD_WIN) != 0) append_key_input(inputs, count, VK_LWIN, true);
+                if (send_ctrl) append_key_input(inputs, count, VK_CONTROL, true);
+                if (send_alt) append_key_input(inputs, count, VK_MENU, true);
+                if (send_shift) append_key_input(inputs, count, VK_SHIFT, true);
+                if (send_win) append_key_input(inputs, count, VK_LWIN, true);
                 append_key_input(inputs, count, vk, true);
             } else {
                 append_key_input(inputs, count, vk, false);
-                if ((binding.mods & MOD_WIN) != 0) append_key_input(inputs, count, VK_LWIN, false);
-                if ((binding.mods & MOD_SHIFT) != 0) append_key_input(inputs, count, VK_SHIFT, false);
-                if ((binding.mods & MOD_ALT) != 0) append_key_input(inputs, count, VK_MENU, false);
-                if ((binding.mods & MOD_CONTROL) != 0) append_key_input(inputs, count, VK_CONTROL, false);
+                if (send_win) append_key_input(inputs, count, VK_LWIN, false);
+                if (send_shift) append_key_input(inputs, count, VK_SHIFT, false);
+                if (send_alt) append_key_input(inputs, count, VK_MENU, false);
+                if (send_ctrl) append_key_input(inputs, count, VK_CONTROL, false);
             }
             break;
         }
@@ -146,7 +154,13 @@ public:
                    std::span<const HidCollectionInfo> collections, bool force_restart_dpi = false) {
         target_hwnd_.store(target_hwnd, std::memory_order_relaxed);
         for (size_t i = 0; i < mappings_.size(); ++i) {
-            mappings_[i] = to_runtime_binding(get_binding(settings.buttons, static_cast<ButtonId>(i)));
+            const RuntimeBinding next = to_runtime_binding(get_binding(settings.buttons, static_cast<ButtonId>(i)));
+            auto& held = active_down_[i];
+            if (held.has_value() && *held != next) {
+                detail::send_binding_event(*held, false);
+                held.reset();
+            }
+            mappings_[i] = next;
         }
 
         remapped_mouse_[0].store(is_binding_remapped(settings.buttons.middle), std::memory_order_relaxed);
@@ -157,6 +171,7 @@ public:
             install_hook();
         } else {
             remove_hook();
+            release_held_buttons(0, static_cast<size_t>(ButtonId::DpiUp));
         }
 
         if (any_driver_mode_needed(settings)) {
@@ -164,16 +179,19 @@ public:
             start_dpi_listener(collections);
         } else {
             stop_dpi_listener();
+            release_held_buttons(static_cast<size_t>(ButtonId::DpiUp), active_down_.size());
         }
     }
 
     void on_device_removed() noexcept {
         stop_dpi_listener();
+        release_held_buttons(static_cast<size_t>(ButtonId::DpiUp), active_down_.size());
     }
 
     void stop() noexcept {
         remove_hook();
         stop_dpi_listener();
+        release_held_buttons(0, active_down_.size());
     }
 
     [[nodiscard]] bool hook_active() const noexcept {
@@ -187,17 +205,33 @@ public:
 
     /// Executes a remapped button event on the service message thread.
     /// Returns +1 for DpiCycleUp, -1 for DpiCycleDown, or 0 otherwise.
-    [[nodiscard]] int dispatch_event(ButtonId btn, bool is_down) const noexcept {
+    [[nodiscard]] int dispatch_event(ButtonId btn, bool is_down) noexcept {
         const auto idx = static_cast<size_t>(btn);
         if (idx >= mappings_.size()) return 0;
+        auto& held = active_down_[idx];
+        if (!is_down) {
+            if (held.has_value()) {
+                detail::send_binding_event(*held, false);
+                held.reset();
+            }
+            return 0;
+        }
+        if (held.has_value()) {
+            detail::send_binding_event(*held, false);
+            held.reset();
+        }
         const RuntimeBinding& binding = mappings_[idx];
         if (binding.kind == ActionKind::DpiCycleUp) {
-            return is_down ? 1 : 0;
+            return 1;
         }
         if (binding.kind == ActionKind::DpiCycleDown) {
-            return is_down ? -1 : 0;
+            return -1;
         }
-        detail::send_binding_event(binding, is_down);
+        if (binding.kind != ActionKind::Default && binding.kind != ActionKind::Disabled &&
+            (binding.kind != ActionKind::KeyCombo || (binding.vk != 0 && binding.vk <= 0xFEu))) {
+            held = binding;
+            detail::send_binding_event(binding, true);
+        }
         return 0;
     }
 
@@ -216,7 +250,9 @@ public:
             heap_buf.resize(size);
             raw_buf = heap_buf.data();
         }
-        if (GetRawInputData(lparam, RID_INPUT, raw_buf, &size, sizeof(RAWINPUTHEADER)) != size) {
+        constexpr UINT RAW_INPUT_ERROR = ~UINT{0};
+        const UINT copied = GetRawInputData(lparam, RID_INPUT, raw_buf, &size, sizeof(RAWINPUTHEADER));
+        if (copied == RAW_INPUT_ERROR || copied < offsetof(RAWINPUT, data.hid.bRawData)) {
             return;
         }
         const auto* raw = reinterpret_cast<const RAWINPUT*>(raw_buf);
@@ -228,13 +264,14 @@ public:
         if (GetRawInputDeviceInfoW(raw->header.hDevice, RIDI_DEVICEINFO, &info, &info_size) == static_cast<UINT>(-1)) {
             return;
         }
-        if (info.hid.dwVendorId != RAZER_VID || info.hid.dwProductId != DEATHADDER_ELITE_PID) {
+        if (info.dwType != RIM_TYPEHID || info.hid.dwVendorId != RAZER_VID ||
+            info.hid.dwProductId != DEATHADDER_ELITE_PID) {
             return;
         }
 
         const size_t report_sz = raw->data.hid.dwSizeHid;
         if (report_sz < 16) return;
-        const size_t avail_bytes = size - offsetof(RAWINPUT, data.hid.bRawData);
+        const size_t avail_bytes = copied - offsetof(RAWINPUT, data.hid.bRawData);
         const size_t report_count = (std::min)(static_cast<size_t>(raw->data.hid.dwCount), avail_bytes / report_sz);
         const uint8_t* ptr = raw->data.hid.bRawData;
         for (size_t i = 0; i < report_count; ++i) {
@@ -284,12 +321,19 @@ private:
                 }
                 if (btn.has_value()) {
                     const auto idx = static_cast<size_t>(*btn);
-                    if (idx < 3 && self->remapped_mouse_[idx].load(std::memory_order_relaxed)) {
-                        if (HWND target = self->target_hwnd_.load(std::memory_order_relaxed)) {
-                            PostMessageW(target, WM_REMAP_EVENT,
-                                         static_cast<WPARAM>(*btn), is_down ? 1 : 0);
+                    if (idx < 3) {
+                        const bool remapped = self->remapped_mouse_[idx].load(std::memory_order_relaxed);
+                        const bool swallow = is_down
+                                                 ? remapped
+                                                 : (remapped || self->swallowed_down_[idx].load(std::memory_order_relaxed));
+                        if (swallow) {
+                            self->swallowed_down_[idx].store(is_down, std::memory_order_relaxed);
+                            if (HWND target = self->target_hwnd_.load(std::memory_order_relaxed)) {
+                                PostMessageW(target, WM_REMAP_EVENT,
+                                             static_cast<WPARAM>(*btn), is_down ? 1 : 0);
+                            }
+                            return 1;
                         }
-                        return 1;
                     }
                 }
             }
@@ -306,6 +350,9 @@ private:
         MSG msg{};
         PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 
+        for (auto& flag : self->swallowed_down_) {
+            flag.store(false, std::memory_order_relaxed);
+        }
         active_instance_.store(self, std::memory_order_release);
         HHOOK hook = SetWindowsHookExW(WH_MOUSE_LL, &ButtonRemapper::low_level_mouse_proc,
                                        GetModuleHandleW(nullptr), 0);
@@ -325,10 +372,24 @@ private:
         }
 
         UnhookWindowsHookEx(hook);
+        for (auto& flag : self->swallowed_down_) {
+            flag.store(false, std::memory_order_relaxed);
+        }
         ButtonRemapper* expected = self;
         active_instance_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
         self->hook_active_.store(false, std::memory_order_release);
         return 0;
+    }
+
+    void release_held_buttons(size_t begin_idx, size_t end_idx) noexcept {
+        const size_t limit = std::min(end_idx, active_down_.size());
+        for (size_t i = begin_idx; i < limit; ++i) {
+            auto& held = active_down_[i];
+            if (held.has_value()) {
+                detail::send_binding_event(*held, false);
+                held.reset();
+            }
+        }
     }
 
     void install_hook() noexcept {
@@ -360,7 +421,7 @@ private:
 
     void remove_hook() noexcept {
         if (hook_thread_) {
-            if (hook_thread_id_ != 0) {
+            if (hook_thread_id_ != 0 && WaitForSingleObject(hook_thread_.get(), 0) == WAIT_TIMEOUT) {
                 PostThreadMessageW(hook_thread_id_, WM_QUIT, 0, 0);
             }
             WaitForSingleObject(hook_thread_.get(), INFINITE);
@@ -408,6 +469,7 @@ private:
             }
             dpi_thread_.reset();
             dpi_stop_event_.reset();
+            unregister_raw_hid_fallback();
         }
         {
             const std::scoped_lock lock{rep4_mu_};
@@ -498,8 +560,8 @@ private:
     void dpi_reader_loop() noexcept {
         static constexpr size_t MAX_DPI_INPUT_BUF = 256;
         struct Reader { // NOLINT(cppcoreguidelines-pro-type-member-init)
-            wil::unique_hfile file;
             wil::unique_event_nothrow ev;
+            wil::unique_hfile file;
             OVERLAPPED ov{};
             std::array<uint8_t, MAX_DPI_INPUT_BUF> buf;
             DWORD buf_len = 0;
@@ -513,8 +575,13 @@ private:
             if (c.input_len < 16 || c.input_len > MAX_DPI_INPUT_BUF) continue;
             if (reader_count >= readers.size()) break;
             wil::unique_hfile h{CreateFileW(
-                c.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                c.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                 nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr)};
+            if (!h) {
+                h.reset(CreateFileW(
+                    c.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
+            }
             if (!h) continue;
             wil::unique_event_nothrow ev{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
             if (!ev) continue;
@@ -607,7 +674,9 @@ private:
     std::mutex rep4_mu_;
     std::atomic<HWND> target_hwnd_{nullptr};
     std::array<RuntimeBinding, static_cast<size_t>(ButtonId::Count)> mappings_{};
+    std::array<std::optional<RuntimeBinding>, static_cast<size_t>(ButtonId::Count)> active_down_{};
     std::array<std::atomic<bool>, 3> remapped_mouse_{};
+    std::array<std::atomic<bool>, 3> swallowed_down_{};
     std::array<uint8_t, 16> prev_rep4_{};
     wil::unique_handle hook_thread_;
     DWORD hook_thread_id_ = 0;
@@ -615,7 +684,7 @@ private:
     std::array<uint32_t, MAX_HID_COLLECTIONS> raw_pages_{};
     size_t raw_pages_count_ = 0;
     std::atomic<bool> raw_fallback_active_{false};
-    HidCollectionList dpi_collections_; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    HidCollectionList dpi_collections_{};
     wil::unique_handle dpi_thread_;
     wil::unique_event_nothrow dpi_stop_event_;
     std::atomic<bool> dpi_stop_requested_{false};

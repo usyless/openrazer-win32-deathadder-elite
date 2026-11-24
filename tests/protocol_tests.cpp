@@ -1,4 +1,6 @@
+#include <da_elite/hid_device.hpp>
 #include <da_elite/razer_protocol.hpp>
+#include <da_elite/remapper.hpp>
 #include <da_elite/settings.hpp>
 
 #include <cstdio>
@@ -189,6 +191,38 @@ int main() try {
         append_utf8_as_wide(appended, to_utf8(L"DeathAdder Elite — ok"));
         DA_CHECK(appended == L"Err: DeathAdder Elite — ok");
         DA_CHECK(!exe_path().empty());
+    }
+
+    // 8. Audit regression tests (protocol bounds, sanitization, HidCollectionInfo, ButtonRemapper)
+    {
+        const auto req = make_get_dpi_xy();
+        auto bad_resp = req;
+        bad_resp.data_size = static_cast<uint8_t>(ARGUMENT_SIZE + 1);
+        DA_CHECK(!response_matches(req, bad_resp));
+
+        Settings s{};
+        s.dpi_stages.clear();
+        for (uint16_t d = 100; d <= 3000; d = static_cast<uint16_t>(d + 100)) {
+            s.dpi_stages.push_back(d);
+        }
+        s.buttons.x1.kind = "key";
+        s.buttons.x1.vk = 0x1234;
+        s.buttons.x1.mods = 0xFFFFu;
+        sanitize_settings(s);
+        DA_CHECK(s.dpi_stages.size() == MAX_DPI_STAGES);
+        DA_CHECK(s.buttons.x1.vk == 0);
+        DA_CHECK(s.buttons.x1.mods == (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN));
+
+        HidCollectionInfo col{};
+        DA_CHECK(col.path_view().empty());
+        DA_CHECK(col.c_str()[0] == L'\0');
+        col.path.assign(L"\\\\?\\hid#vid_1532&pid_005c&mi_00#test");
+        const HidCollectionInfo col_copy = col;
+        DA_CHECK(col_copy.path_view() == L"\\\\?\\hid#vid_1532&pid_005c&mi_00#test");
+
+        ButtonRemapper remapper;
+        DA_CHECK(remapper.dispatch_event(ButtonId::Count, true) == 0);
+        DA_CHECK(remapper.dispatch_event(ButtonId::Middle, false) == 0);
     }
 
     std::println("All protocol & settings tests passed.");

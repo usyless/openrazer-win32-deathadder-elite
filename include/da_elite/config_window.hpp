@@ -202,10 +202,12 @@ public:
 
     /// Intercepts key presses while recording a button shortcut. Returns true if consumed.
     bool handle_message_if_recording(const MSG& msg) {
-        if (!recording_btn_.has_value()) return false;
+        if (!recording_btn_.has_value() || hwnd_ == nullptr) return false;
         if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) return false;
+        if (msg.hwnd != hwnd_ && IsChild(hwnd_, msg.hwnd) == FALSE) return false;
 
         const auto vk = static_cast<uint32_t>(msg.wParam);
+        if (vk == 0 || vk > 0xFEu || vk == VK_PACKET) return true;
         if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
             vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU ||
             vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT ||
@@ -570,7 +572,9 @@ private:
                     if (on_startup_) {
                         const bool actual = on_startup_(want);
                         draft_.launch_on_startup = actual;
-                        SendMessageW(chk_startup_, BM_SETCHECK, actual ? BST_CHECKED : BST_UNCHECKED, 0);
+                        if (chk_startup_ != nullptr) {
+                            SendMessageW(chk_startup_, BM_SETCHECK, actual ? BST_CHECKED : BST_UNCHECKED, 0);
+                        }
                     }
                     return 0;
                 }
@@ -580,7 +584,9 @@ private:
                     if (on_apply_) {
                         status_scratch_.clear();
                         on_apply_(draft_, status_scratch_);
-                        if (!status_scratch_.empty()) SetWindowTextW(lbl_status_, status_scratch_.c_str());
+                        if (lbl_status_ != nullptr && !status_scratch_.empty()) {
+                            SetWindowTextW(lbl_status_, status_scratch_.c_str());
+                        }
                     }
                     return 0;
                 }

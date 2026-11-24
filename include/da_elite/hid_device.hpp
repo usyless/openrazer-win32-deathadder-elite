@@ -14,7 +14,6 @@ extern "C" {
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <cwchar>
 #include <mutex>
 #include <optional>
@@ -29,9 +28,8 @@ namespace da_elite {
 inline constexpr size_t MAX_HID_PATH_CHARS = 320;
 inline constexpr size_t MAX_HID_COLLECTIONS = 16;
 
-struct HidCollectionInfo { // NOLINT(cppcoreguidelines-pro-type-member-init)
-    std::array<wchar_t, MAX_HID_PATH_CHARS> path;
-    size_t path_len = 0;
+struct HidCollectionInfo {
+    FixedWString<MAX_HID_PATH_CHARS> path;
     int interface_num = -1;
     int collection_num = -1;
     uint16_t usage_page = 0;
@@ -40,12 +38,12 @@ struct HidCollectionInfo { // NOLINT(cppcoreguidelines-pro-type-member-init)
     uint16_t input_len = 0;
     uint16_t output_len = 0;
 
-    [[nodiscard]] const wchar_t* c_str() const noexcept { return path.data(); }
-    [[nodiscard]] std::wstring_view path_view() const noexcept { return {path.data(), path_len}; }
+    [[nodiscard]] const wchar_t* c_str() const noexcept { return path.c_str(); }
+    [[nodiscard]] std::wstring_view path_view() const noexcept { return path.view(); }
 };
 
 struct HidCollectionList {
-    std::array<HidCollectionInfo, MAX_HID_COLLECTIONS> items; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::array<HidCollectionInfo, MAX_HID_COLLECTIONS> items{};
     size_t count = 0;
 
     [[nodiscard]] std::span<const HidCollectionInfo> span() const noexcept { return {items.data(), count}; }
@@ -113,8 +111,7 @@ namespace detail {
     HIDP_CAPS caps{};
     if (HidP_GetCaps(preparsed, &caps) != HIDP_STATUS_SUCCESS) return false;
 
-    std::memcpy(info.path.data(), path, (view.size() + 1) * sizeof(wchar_t));
-    info.path_len = view.size();
+    info.path.assign(view);
     info.interface_num = parse_hex_tag(view, L"&mi_");
     info.collection_num = parse_hex_tag(view, L"&col");
     info.usage_page = caps.UsagePage;
@@ -337,6 +334,7 @@ private:
         if (!handle_ && !connect_locked()) return false;
 
         const auto packed = protocol::pack_feature_report(request);
+        const bool is_write_cmd = (request.command_id & 0x80u) == 0;
         for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt) {
             if (!handle_ && !connect_locked()) return false;
 
@@ -345,7 +343,8 @@ private:
                 last_error_.clear();
                 append_to(last_error_, "HidD_SetFeature failed: ", win32_error_utf8(GetLastError()));
                 handle_.reset();
-                Sleep(10);
+                control_info_.reset();
+                if (attempt + 1 < MAX_ATTEMPTS) Sleep(10);
                 continue;
             }
 
@@ -359,6 +358,7 @@ private:
                     last_error_.clear();
                     append_to(last_error_, "HidD_GetFeature failed: ", win32_error_utf8(GetLastError()));
                     handle_.reset();
+                    control_info_.reset();
                     got_reply = false;
                     break;
                 }
@@ -369,25 +369,31 @@ private:
                     response.status != static_cast<uint8_t>(protocol::Status::Busy)) {
                     break;
                 }
-                Sleep(2);
+                if (poll + 1 < MAX_ATTEMPTS) Sleep(10);
             }
 
-            if (got_reply && protocol::response_matches(request, response) &&
-                response.status == static_cast<uint8_t>(protocol::Status::Successful)) {
+            const bool matched = got_reply && protocol::response_matches(request, response);
+            if (matched &&
+                (response.status == static_cast<uint8_t>(protocol::Status::Successful) ||
+                 (is_write_cmd && response.status == static_cast<uint8_t>(protocol::Status::Busy)))) {
                 last_error_.clear();
                 return true;
             }
 
             if (got_reply) {
-                if (response.status == static_cast<uint8_t>(protocol::Status::NotSupported)) {
+                if (matched && response.status == static_cast<uint8_t>(protocol::Status::NotSupported)) {
                     last_error_ = "Command not supported by device firmware.";
                     return false;
                 }
-                // Clear any earlier transport error so a final protocol status failure isn't masked.
-                last_error_.clear();
+                if (!matched) {
+                    last_error_ = "Device response did not match request.";
+                } else {
+                    // Clear any earlier transport error so a final protocol status failure isn't masked.
+                    last_error_.clear();
+                }
             }
 
-            Sleep(10);
+            if (attempt + 1 < MAX_ATTEMPTS) Sleep(10);
         }
 
         if (last_error_.empty()) {
@@ -398,7 +404,7 @@ private:
 
     mutable std::mutex mu_;
     wil::unique_hfile handle_;
-    HidCollectionList collections_; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    HidCollectionList collections_{};
     std::optional<HidCollectionInfo> control_info_;
     std::string last_error_;
 };

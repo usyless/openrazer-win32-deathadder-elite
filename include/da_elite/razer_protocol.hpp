@@ -7,6 +7,7 @@
 #include <cstring>
 #include <optional>
 #include <span>
+#include <type_traits>
 
 namespace da_elite::protocol {
 
@@ -59,6 +60,7 @@ struct RazerReport {
 #pragma pack(pop)
 
 static_assert(sizeof(RazerReport) == REPORT_SIZE);
+static_assert(std::is_trivially_copyable_v<RazerReport>);
 
 /// Computes the Razer protocol checksum: XOR of bytes [2..87] inclusive.
 [[nodiscard]] constexpr uint8_t calculate_crc(std::span<const uint8_t, REPORT_SIZE> raw) noexcept {
@@ -88,7 +90,8 @@ static_assert(sizeof(RazerReport) == REPORT_SIZE);
 }
 
 [[nodiscard]] constexpr bool response_matches(const RazerReport& request, const RazerReport& response) noexcept {
-    return response.remaining_packets == request.remaining_packets &&
+    return response.data_size <= ARGUMENT_SIZE &&
+           response.remaining_packets == request.remaining_packets &&
            response.command_class == request.command_class &&
            response.command_id == request.command_id;
 }

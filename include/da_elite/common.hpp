@@ -13,6 +13,7 @@
 #include <concepts>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -39,7 +40,7 @@ enum class AppCmd : uint32_t {
 };
 
 [[nodiscard]] inline std::string to_utf8(std::wstring_view w) {
-    if (w.empty()) return {};
+    if (w.empty() || w.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return {};
     const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
     if (n <= 0) return {};
     std::string out;
@@ -51,7 +52,7 @@ enum class AppCmd : uint32_t {
 }
 
 [[nodiscard]] inline std::wstring to_wide(std::string_view s) {
-    if (s.empty()) return {};
+    if (s.empty() || s.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     if (n <= 0) return {};
     std::wstring out;
@@ -63,7 +64,7 @@ enum class AppCmd : uint32_t {
 }
 
 inline void append_utf8_as_wide(std::wstring& dst, std::string_view s) {
-    if (s.empty()) return;
+    if (s.empty() || s.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return;
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     if (n <= 0) return;
     const size_t old = dst.size();
@@ -133,6 +134,7 @@ struct FixedBasicString {
     }
 
     constexpr void append(std::basic_string_view<Char> sv) noexcept {
+        if (len >= N - 1) return;
         const size_t room = (N - 1) - len;
         const size_t n = std::min(sv.size(), room);
         for (size_t i = 0; i < n; ++i) buf[len + i] = sv[i];
@@ -255,7 +257,7 @@ template <size_t N = 32, typename T>
     FixedWString<N> out;
     if (ec == std::errc{}) {
         const auto n = static_cast<size_t>(ptr - tmp.data());
-        for (size_t i = 0; i < n; ++i) out.buf[i] = static_cast<wchar_t>(tmp[i]);
+        for (size_t i = 0; i < n; ++i) out.buf[i] = static_cast<wchar_t>(static_cast<unsigned char>(tmp[i]));
         out.len = n;
         out.buf[n] = L'\0';
     }
@@ -269,7 +271,7 @@ template <size_t N = 48, std::floating_point T>
     FixedWString<N> out;
     if (ec == std::errc{}) {
         const auto n = static_cast<size_t>(ptr - tmp.data());
-        for (size_t i = 0; i < n; ++i) out.buf[i] = static_cast<wchar_t>(tmp[i]);
+        for (size_t i = 0; i < n; ++i) out.buf[i] = static_cast<wchar_t>(static_cast<unsigned char>(tmp[i]));
         out.len = n;
         out.buf[n] = L'\0';
     }
@@ -360,7 +362,7 @@ inline bool write_file_bytes(const wchar_t* path, std::string_view data) noexcep
                 }
                 return n;
             });
-            if (done) break;
+            if (done || cap >= 65536u) break;
             cap *= 2;
         }
         return fs::path{std::move(buf)};
