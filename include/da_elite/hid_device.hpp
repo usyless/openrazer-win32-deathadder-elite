@@ -232,10 +232,8 @@ public:
     [[nodiscard]] std::optional<FixedString<24>> get_firmware_version() {
         protocol::RazerReport resp{};
         if (!send_command(protocol::make_get_firmware_version(), resp)) return std::nullopt;
-        FixedString<24> out{"v"};
-        out.append(to_fixed_str(resp.arguments[0]));
-        out.push_back('.');
-        out.append(to_fixed_str(resp.arguments[1]));
+        FixedString<24> out;
+        out.assign("v", to_fixed_str(resp.arguments[0]), '.', to_fixed_str(resp.arguments[1]));
         return out;
     }
 
@@ -323,8 +321,7 @@ private:
         if (!any_control) {
             last_error_ = "Razer DeathAdder Elite (1532:005C) not found.";
         } else {
-            last_error_.clear();
-            append_to(last_error_, "Could not open HID control handle: ", win32_error_utf8(last_open_err));
+            overwrite_to(last_error_, "Could not open HID control handle: ", win32_error_utf8(last_open_err));
         }
         return false;
     }
@@ -340,8 +337,7 @@ private:
 
             std::array<uint8_t, protocol::FEATURE_BUFFER_SIZE> out_buf = packed;
             if (!HidD_SetFeature(handle_.get(), out_buf.data(), static_cast<ULONG>(out_buf.size()))) {
-                last_error_.clear();
-                append_to(last_error_, "HidD_SetFeature failed: ", win32_error_utf8(GetLastError()));
+                overwrite_to(last_error_, "HidD_SetFeature failed: ", win32_error_utf8(GetLastError()));
                 handle_.reset();
                 control_info_.reset();
                 if (attempt + 1 < MAX_ATTEMPTS) Sleep(10);
@@ -355,8 +351,7 @@ private:
                 std::array<uint8_t, protocol::FEATURE_BUFFER_SIZE> in_buf{};
                 in_buf[0] = 0x00;
                 if (!HidD_GetFeature(handle_.get(), in_buf.data(), static_cast<ULONG>(in_buf.size()))) {
-                    last_error_.clear();
-                    append_to(last_error_, "HidD_GetFeature failed: ", win32_error_utf8(GetLastError()));
+                    overwrite_to(last_error_, "HidD_GetFeature failed: ", win32_error_utf8(GetLastError()));
                     handle_.reset();
                     control_info_.reset();
                     got_reply = false;

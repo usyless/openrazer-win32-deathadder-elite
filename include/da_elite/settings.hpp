@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cwchar>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -193,8 +194,7 @@ struct RuntimeBinding {
         return t;
     }
     if (vk >= VK_F1 && vk <= VK_F24) {
-        t.push_back(L'F');
-        t.append(to_fixed_wstr(vk - VK_F1 + 1));
+        t.append(L'F', to_fixed_wstr(vk - VK_F1 + 1));
         return t;
     }
 
@@ -210,8 +210,7 @@ struct RuntimeBinding {
         t.append(std::wstring_view{buf.data(), static_cast<size_t>(n)});
         return t;
     }
-    t.append(L"VK_");
-    t.append(to_fixed_wstr(vk));
+    t.append(L"VK_", to_fixed_wstr(vk));
     return t;
 }
 
@@ -244,38 +243,182 @@ inline void sanitize_settings(Settings& s) {
     }
 }
 
-inline constexpr const wchar_t* RUN_REG_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+inline constexpr const wchar_t* STARTUP_RUN_SUBKEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+inline constexpr const wchar_t* STARTUP_APPROVED_SUBKEY =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+inline constexpr const wchar_t* STARTUP_VALUE_NAME = L"da-elite";
 
+/// Evaluates the REG_BINARY value stored under
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`.
+/// Windows uses bit 0 of the first byte to mark a Run entry disabled (`0x03`, `0x01`, `0x05`, `0x07`)
+/// vs enabled (`0x02`, `0x06`, `0x00`). Empty/missing data defaults to approved.
+[[nodiscard]] constexpr bool is_startup_approved_bytes(std::span<const uint8_t> data) noexcept {
+    if (data.empty()) return true;
+    return (data[0] & 0x01u) == 0u;
+}
+
+/// Candidate executable paths extracted from a Windows `Run` registry command string.
+struct StartupCommandCandidates {
+    std::wstring_view primary;
+    std::wstring_view fallback; // non-empty only for unquoted commands containing whitespace
+};
+
+/// Extracts candidate executable path(s) from a `CurrentVersion\Run` command line.
+/// - Quoted commands (`"C:\path with spaces\da-elite.exe" --tray`) return the quoted path as `primary`.
+/// - Unclosed quotes return empty candidates.
+/// - Unquoted commands return the trimmed full string as `primary`, and (if whitespace is present)
+///   the leading whitespace-delimited token as `fallback` so both unquoted paths with spaces and
+///   unquoted paths with arguments can be checked against the filesystem.
+[[nodiscard]] constexpr StartupCommandCandidates extract_startup_command_exe(std::wstring_view cmd) noexcept {
+    if (const size_t nul = cmd.find(L'\0'); nul != std::wstring_view::npos) {
+        cmd = cmd.substr(0, nul);
+    }
+    constexpr auto is_ws = [](wchar_t c) noexcept {
+        return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+    };
+    while (!cmd.empty() && is_ws(cmd.front())) cmd.remove_prefix(1);
+    while (!cmd.empty() && is_ws(cmd.back())) cmd.remove_suffix(1);
+    if (cmd.empty()) return {};
+
+    if (cmd.front() == L'"') {
+        const size_t close = cmd.find(L'"', 1);
+        if (close == std::wstring_view::npos || close == 1) return {};
+        std::wstring_view inside = cmd.substr(1, close - 1);
+        while (!inside.empty() && is_ws(inside.front())) inside.remove_prefix(1);
+        while (!inside.empty() && is_ws(inside.back())) inside.remove_suffix(1);
+        return {.primary = inside, .fallback = {}};
+    }
+
+    size_t ws_pos = std::wstring_view::npos;
+    for (size_t i = 0; i < cmd.size(); ++i) {
+        if (is_ws(cmd[i])) {
+            ws_pos = i;
+            break;
+        }
+    }
+    if (ws_pos == std::wstring_view::npos) {
+        return {.primary = cmd, .fallback = {}};
+    }
+    return {.primary = cmd, .fallback = cmd.substr(0, ws_pos)};
+}
+
+/// True when `HKCU\...\CurrentVersion\Run\da-elite` exists, points to this installation's
+/// executable on disk, and is not disabled under `Explorer\StartupApproved\Run`.
 [[nodiscard]] inline bool is_startup_enabled() noexcept {
-    wil::unique_hkey key;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY, 0, KEY_QUERY_VALUE, key.put()) != ERROR_SUCCESS) {
+    try {
+        wil::unique_hkey key;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_RUN_SUBKEY, 0, KEY_READ, key.put()) != ERROR_SUCCESS) {
+            return false;
+        }
+        std::array<wchar_t, MAX_PATH * 2> stack_buf; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        auto sz = static_cast<DWORD>(stack_buf.size() * sizeof(wchar_t));
+        DWORD type = 0;
+        LSTATUS st = RegQueryValueExW(key.get(), STARTUP_VALUE_NAME, nullptr, &type,
+                                      reinterpret_cast<LPBYTE>(stack_buf.data()), &sz);
+        std::wstring dyn_buf;
+        std::wstring_view raw;
+        if (st == ERROR_MORE_DATA && (type == REG_SZ || type == REG_EXPAND_SZ) && sz >= sizeof(wchar_t)) {
+            dyn_buf.resize((sz + sizeof(wchar_t) - 1) / sizeof(wchar_t));
+            st = RegQueryValueExW(key.get(), STARTUP_VALUE_NAME, nullptr, &type,
+                                  reinterpret_cast<LPBYTE>(dyn_buf.data()), &sz);
+            if (st == ERROR_SUCCESS) raw = std::wstring_view{dyn_buf.data(), sz / sizeof(wchar_t)};
+        } else if (st == ERROR_SUCCESS) {
+            raw = std::wstring_view{stack_buf.data(), sz / sizeof(wchar_t)};
+        }
+        key.reset();
+        if (st != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || raw.empty()) return false;
+
+        std::wstring expanded;
+        std::wstring_view cmd = raw;
+        if (type == REG_EXPAND_SZ) {
+            std::wstring nul_terminated;
+            if (const size_t nul = raw.find(L'\0'); nul != std::wstring_view::npos) {
+                nul_terminated.assign(raw.substr(0, nul));
+            } else {
+                nul_terminated.assign(raw);
+            }
+            const DWORD need = ExpandEnvironmentStringsW(nul_terminated.c_str(), nullptr, 0);
+            if (need == 0) return false;
+            expanded.resize(need);
+            const DWORD written = ExpandEnvironmentStringsW(nul_terminated.c_str(), expanded.data(), need);
+            if (written == 0 || written > need) return false;
+            cmd = std::wstring_view{expanded.data(), written};
+        }
+
+        const StartupCommandCandidates cands = extract_startup_command_exe(cmd);
+        if (cands.primary.empty()) return false;
+
+        const fs::path& expected = exe_path();
+        const auto matches_expected = [&](std::wstring_view candidate) -> bool {
+            if (candidate.empty()) return false;
+            std::error_code ec;
+            const fs::path p{candidate};
+            if (!fs::is_regular_file(p, ec) || ec) return false;
+            return fs::equivalent(p, expected, ec) && !ec;
+        };
+        if (!matches_expected(cands.primary) && !matches_expected(cands.fallback)) return false;
+
+        wil::unique_hkey approved;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_SUBKEY, 0, KEY_READ, approved.put()) == ERROR_SUCCESS) {
+            std::array<uint8_t, 32> stack_bin; // NOLINT(cppcoreguidelines-pro-type-member-init)
+            auto bsz = static_cast<DWORD>(stack_bin.size());
+            DWORD btype = 0;
+            LSTATUS bst = RegQueryValueExW(approved.get(), STARTUP_VALUE_NAME, nullptr, &btype,
+                                           stack_bin.data(), &bsz);
+            std::vector<uint8_t> dyn_bin;
+            std::span<const uint8_t> bin;
+            if (bst == ERROR_MORE_DATA && btype == REG_BINARY && bsz > 0) {
+                dyn_bin.resize(bsz);
+                bst = RegQueryValueExW(approved.get(), STARTUP_VALUE_NAME, nullptr, &btype,
+                                       dyn_bin.data(), &bsz);
+                if (bst == ERROR_SUCCESS) bin = std::span<const uint8_t>{dyn_bin.data(), std::min<size_t>(bsz, dyn_bin.size())};
+            } else if (bst == ERROR_SUCCESS && btype == REG_BINARY && bsz > 0) {
+                bin = std::span<const uint8_t>{stack_bin.data(), std::min<size_t>(bsz, stack_bin.size())};
+            }
+            if (bst == ERROR_SUCCESS && btype == REG_BINARY && !is_startup_approved_bytes(bin)) return false;
+        }
+        return true;
+    } catch (...) {
         return false;
     }
-    DWORD type = 0;
-    DWORD size = 0;
-    const LSTATUS st = RegQueryValueExW(key.get(), L"da-elite", nullptr, &type, nullptr, &size);
-    return st == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && size > sizeof(wchar_t);
 }
 
 inline bool set_startup_enabled(bool enable) {
     wil::unique_hkey key;
-    LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, RUN_REG_KEY,
+    LSTATUS st = RegCreateKeyExW(HKEY_CURRENT_USER, STARTUP_RUN_SUBKEY,
                                  0, nullptr, 0, KEY_SET_VALUE, nullptr, key.put(), nullptr);
     if (st != ERROR_SUCCESS) {
         SetLastError(static_cast<DWORD>(st));
         return false;
     }
     if (enable) {
-        const std::wstring cmd = ulp::str::concat_strings(L"\"", exe_path().native(), L"\" --tray");
-        st = RegSetValueExW(key.get(), L"da-elite", 0, REG_SZ,
+        const std::wstring cmd = concat_wide(L"\"", exe_path(), L"\" --tray");
+        st = RegSetValueExW(key.get(), STARTUP_VALUE_NAME, 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(cmd.c_str()),
                             static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
     } else {
-        st = RegDeleteValueW(key.get(), L"da-elite");
+        st = RegDeleteValueW(key.get(), STARTUP_VALUE_NAME);
         if (st == ERROR_FILE_NOT_FOUND) st = ERROR_SUCCESS;
     }
+    key.reset();
     if (st != ERROR_SUCCESS) {
         SetLastError(static_cast<DWORD>(st));
+        return false;
+    }
+
+    // Clear any Windows Task Manager / Settings StartupApproved override so enabling genuinely activates
+    // the Run entry and disabling leaves no stale registry state behind.
+    wil::unique_hkey approved;
+    const LSTATUS open_st = RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_APPROVED_SUBKEY, 0, KEY_SET_VALUE, approved.put());
+    if (open_st == ERROR_SUCCESS) {
+        LSTATUS del_st = RegDeleteValueW(approved.get(), STARTUP_VALUE_NAME);
+        if (del_st == ERROR_FILE_NOT_FOUND) del_st = ERROR_SUCCESS;
+        if (del_st != ERROR_SUCCESS) {
+            SetLastError(static_cast<DWORD>(del_st));
+            return false;
+        }
+    } else if (open_st != ERROR_FILE_NOT_FOUND) {
+        SetLastError(static_cast<DWORD>(open_st));
         return false;
     }
     return true;
@@ -296,14 +439,10 @@ inline bool save_settings(const Settings& s, std::string& json_scratch) {
     const std::wstring_view pview = path.native();
     const wchar_t* tmp_ptr = nullptr;
     if (pview.size() + 5 + pid.size() + 1 + tid.size() <= FixedWString<512>::capacity()) {
-        tmp_stack.assign(pview);
-        tmp_stack.append(L".tmp.");
-        tmp_stack.append(pid);
-        tmp_stack.push_back(L'.');
-        tmp_stack.append(tid);
+        tmp_stack.assign(pview, L".tmp.", pid, L'.', tid);
         tmp_ptr = tmp_stack.c_str();
     } else {
-        tmp_heap = ulp::str::concat_strings(pview, L".tmp.", pid, L".", tid);
+        tmp_heap = concat_wide(pview, L".tmp.", pid, L'.', tid);
         tmp_ptr = tmp_heap.c_str();
     }
 

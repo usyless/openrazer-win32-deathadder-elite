@@ -16,6 +16,96 @@
         }                                                                                          \
     } while (false)
 
+namespace {
+
+int test_startup_logic() {
+    using namespace da_elite;
+    using namespace std::string_view_literals;
+
+    DA_CHECK(is_startup_approved_bytes({}));
+    const std::array<uint8_t, 12> enabled_default{0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::array<uint8_t, 12> enabled_alt{0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::array<uint8_t, 12> enabled_zero{0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    DA_CHECK(is_startup_approved_bytes(enabled_default));
+    DA_CHECK(is_startup_approved_bytes(enabled_alt));
+    DA_CHECK(is_startup_approved_bytes(enabled_zero));
+
+    const std::array<uint8_t, 12> disabled_user{0x03, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0x01};
+    const std::array<uint8_t, 12> disabled_one{0x01, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0x01};
+    const std::array<uint8_t, 12> disabled_seven{0x07, 0, 0, 0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0x01};
+    DA_CHECK(!is_startup_approved_bytes(disabled_user));
+    DA_CHECK(!is_startup_approved_bytes(disabled_one));
+    DA_CHECK(!is_startup_approved_bytes(disabled_seven));
+
+    const auto quoted = extract_startup_command_exe(L"\"C:\\Program Files\\da-elite\\da-elite.exe\"");
+    DA_CHECK(quoted.primary == L"C:\\Program Files\\da-elite\\da-elite.exe");
+    DA_CHECK(quoted.fallback.empty());
+
+    const auto quoted_args = extract_startup_command_exe(L"  \"C:\\Program Files\\da-elite\\da-elite.exe\" --tray  ");
+    DA_CHECK(quoted_args.primary == L"C:\\Program Files\\da-elite\\da-elite.exe");
+    DA_CHECK(quoted_args.fallback.empty());
+
+    const auto unquoted = extract_startup_command_exe(L"C:\\Apps\\da-elite.exe");
+    DA_CHECK(unquoted.primary == L"C:\\Apps\\da-elite.exe");
+    DA_CHECK(unquoted.fallback.empty());
+
+    const auto unquoted_with_args = extract_startup_command_exe(L"C:\\Apps\\da-elite.exe --tray");
+    DA_CHECK(unquoted_with_args.primary == L"C:\\Apps\\da-elite.exe --tray");
+    DA_CHECK(unquoted_with_args.fallback == L"C:\\Apps\\da-elite.exe");
+
+    const auto unquoted_spaces = extract_startup_command_exe(L"C:\\Program Files\\da-elite\\da-elite.exe");
+    DA_CHECK(unquoted_spaces.primary == L"C:\\Program Files\\da-elite\\da-elite.exe");
+    DA_CHECK(unquoted_spaces.fallback == L"C:\\Program");
+
+    const std::wstring_view with_nul = L"\"C:\\Apps\\da-elite.exe\"\0trailing"sv;
+    const auto nul_res = extract_startup_command_exe(with_nul);
+    DA_CHECK(nul_res.primary == L"C:\\Apps\\da-elite.exe");
+    DA_CHECK(nul_res.fallback.empty());
+
+    DA_CHECK(extract_startup_command_exe(L"").primary.empty());
+    DA_CHECK(extract_startup_command_exe(L"   \t\r\n ").primary.empty());
+    DA_CHECK(extract_startup_command_exe(L"\"\"").primary.empty());
+    DA_CHECK(extract_startup_command_exe(L"\"C:\\Apps\\da-elite.exe").primary.empty());
+    return 0;
+}
+
+int test_audit_regressions() {
+    using namespace da_elite;
+    using namespace da_elite::protocol;
+
+    const auto req = make_get_dpi_xy();
+    auto bad_resp = req;
+    bad_resp.data_size = static_cast<uint8_t>(ARGUMENT_SIZE + 1);
+    DA_CHECK(!response_matches(req, bad_resp));
+
+    Settings s{};
+    s.dpi_stages.clear();
+    for (uint16_t d = 100; d <= 3000; d = static_cast<uint16_t>(d + 100)) {
+        s.dpi_stages.push_back(d);
+    }
+    s.buttons.x1.kind = "key";
+    s.buttons.x1.vk = 0x1234;
+    s.buttons.x1.mods = 0xFFFFu;
+    sanitize_settings(s);
+    DA_CHECK(s.dpi_stages.size() == MAX_DPI_STAGES);
+    DA_CHECK(s.buttons.x1.vk == 0);
+    DA_CHECK(s.buttons.x1.mods == (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN));
+
+    HidCollectionInfo col{};
+    DA_CHECK(col.path_view().empty());
+    DA_CHECK(col.c_str()[0] == L'\0');
+    col.path.assign(L"\\\\?\\hid#vid_1532&pid_005c&mi_00#test");
+    const HidCollectionInfo col_copy = col;
+    DA_CHECK(col_copy.path_view() == L"\\\\?\\hid#vid_1532&pid_005c&mi_00#test");
+
+    ButtonRemapper remapper;
+    DA_CHECK(remapper.dispatch_event(ButtonId::Count, true) == 0);
+    DA_CHECK(remapper.dispatch_event(ButtonId::Middle, false) == 0);
+    return 0;
+}
+
+} // namespace
+
 int main() try {
     using namespace da_elite;
     using namespace da_elite::protocol;
@@ -171,7 +261,7 @@ int main() try {
         const auto fw_str = to_fixed_wstr(3.25, 2);
         DA_CHECK(fw_str == L"3.25");
 
-        const std::wstring joined = ulp::str::concat_strings(L"DPI=", w_str, L", Hz=", to_fixed_wstr(500));
+        const std::wstring joined = concat_wide(L"DPI=", w_str, L", Hz=", to_fixed_wstr(500));
         DA_CHECK(joined == L"DPI=1000, Hz=500");
 
         std::string app = "abc";
@@ -188,42 +278,16 @@ int main() try {
         DA_CHECK(!parse_long(L"12345678901234567890123456789012").has_value());
         DA_CHECK(to_wide(to_utf8(L"DeathAdder Elite — 800 DPI")) == L"DeathAdder Elite — 800 DPI");
         std::wstring appended = L"Err: ";
-        append_utf8_as_wide(appended, to_utf8(L"DeathAdder Elite — ok"));
+        append_to(appended, to_utf8(L"DeathAdder Elite — ok"));
         DA_CHECK(appended == L"Err: DeathAdder Elite — ok");
+        overwrite_to(appended, L"Status: ", FixedString<16>{"v1.2"}, L" ok");
+        DA_CHECK(appended == L"Status: v1.2 ok");
         DA_CHECK(!exe_path().empty());
     }
 
-    // 8. Audit regression tests (protocol bounds, sanitization, HidCollectionInfo, ButtonRemapper)
-    {
-        const auto req = make_get_dpi_xy();
-        auto bad_resp = req;
-        bad_resp.data_size = static_cast<uint8_t>(ARGUMENT_SIZE + 1);
-        DA_CHECK(!response_matches(req, bad_resp));
-
-        Settings s{};
-        s.dpi_stages.clear();
-        for (uint16_t d = 100; d <= 3000; d = static_cast<uint16_t>(d + 100)) {
-            s.dpi_stages.push_back(d);
-        }
-        s.buttons.x1.kind = "key";
-        s.buttons.x1.vk = 0x1234;
-        s.buttons.x1.mods = 0xFFFFu;
-        sanitize_settings(s);
-        DA_CHECK(s.dpi_stages.size() == MAX_DPI_STAGES);
-        DA_CHECK(s.buttons.x1.vk == 0);
-        DA_CHECK(s.buttons.x1.mods == (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN));
-
-        HidCollectionInfo col{};
-        DA_CHECK(col.path_view().empty());
-        DA_CHECK(col.c_str()[0] == L'\0');
-        col.path.assign(L"\\\\?\\hid#vid_1532&pid_005c&mi_00#test");
-        const HidCollectionInfo col_copy = col;
-        DA_CHECK(col_copy.path_view() == L"\\\\?\\hid#vid_1532&pid_005c&mi_00#test");
-
-        ButtonRemapper remapper;
-        DA_CHECK(remapper.dispatch_event(ButtonId::Count, true) == 0);
-        DA_CHECK(remapper.dispatch_event(ButtonId::Middle, false) == 0);
-    }
+    // 8. Startup registry logic & audit regression tests
+    if (test_startup_logic() != 0) return 1;
+    if (test_audit_regressions() != 0) return 1;
 
     std::println("All protocol & settings tests passed.");
     return 0;
